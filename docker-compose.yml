@@ -1,0 +1,39 @@
+services:
+  basicsubscriptionbot-api:
+    build:
+      context: ./BasicSubscriptionBot.Api
+    container_name: basicsubscriptionbot-api
+    restart: unless-stopped
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - ConnectionStrings__Sqlite=Data Source=/data/basicsubscriptionbot.db;Cache=Shared
+      # Restrict the Host header allowlist to the docker-compose service name +
+      # localhost. If you publish ports or rename the service, update this list
+      # (or set AllowedHosts in your shell env before `docker compose up`).
+      - AllowedHosts=basicsubscriptionbot-api;localhost
+      # Optional shared secret. Set BASICSUBSCRIPTIONBOT_API_KEY in your host shell (or in
+      # ./acp-v2/.env, which docker compose auto-loads at the project root via
+      # `--env-file`) to enable X-API-Key auth between the sidecar and the API.
+      - BASICSUBSCRIPTIONBOT_API_KEY=${BASICSUBSCRIPTIONBOT_API_KEY:-}
+    volumes:
+      # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user). One-time
+      # setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.
+      - ./data:/data
+    networks: [basicsubscriptionbot]
+    # No ports published — only the sidecar talks to it.
+
+  basicsubscriptionbot-acp:
+    build:
+      context: ./acp-v2
+    container_name: basicsubscriptionbot-acp
+    restart: unless-stopped
+    depends_on: [basicsubscriptionbot-api]
+    env_file: ./acp-v2/.env
+    environment:
+      - BASICSUBSCRIPTIONBOT_API_URL=http://basicsubscriptionbot-api:5000
+    networks: [basicsubscriptionbot]
+
+networks:
+  basicsubscriptionbot:
+    driver: bridge
