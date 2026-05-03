@@ -74,4 +74,28 @@ public class SubscriptionServiceTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
     }
+
+    [Fact]
+    public async Task Create_unknown_offering_does_not_leave_orphan_row()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var subs = new SubscriptionRepository(t.Db);
+        var svc = new SubscriptionService(subs, new TickEchoRepository(t.Db));
+
+        var bad = new CreateSubscriptionRequest(
+            "j", "0x", "unknown",
+            new Dictionary<string, object>
+            {
+                ["webhookUrl"] = "https://x/cb",
+                ["intervalSeconds"] = 60,
+                ["ticks"] = 1
+            });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
+
+        // Verify NO subscription rows were created
+        var due = await subs.GetDueAsync(DateTime.UtcNow.AddDays(365), limit: 100);
+        Assert.Empty(due);
+    }
 }

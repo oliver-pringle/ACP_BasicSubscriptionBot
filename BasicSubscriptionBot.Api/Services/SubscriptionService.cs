@@ -18,6 +18,10 @@ public class SubscriptionService
 
     public async Task<CreateSubscriptionResponse> CreateAsync(CreateSubscriptionRequest req)
     {
+        // Validate offering name FIRST — fail fast before any DB writes or secret gen.
+        if (req.OfferingName != "tick_echo")
+            throw new InvalidOperationException($"unknown offering: {req.OfferingName}");
+
         var ticks = AsInt(req.Requirement, "ticks");
         var interval = AsInt(req.Requirement, "intervalSeconds");
         var webhookUrl = AsString(req.Requirement, "webhookUrl");
@@ -48,14 +52,10 @@ public class SubscriptionService
         );
         await _subs.InsertAsync(sub);
 
-        // Per-offering state
-        switch (req.OfferingName)
+        // Per-offering state (offering name already validated above)
+        if (req.OfferingName == "tick_echo")
         {
-            case "tick_echo":
-                await _tickEcho.InsertAsync(id, AsString(req.Requirement, "message"));
-                break;
-            default:
-                throw new InvalidOperationException($"unknown offering: {req.OfferingName}");
+            await _tickEcho.InsertAsync(id, AsString(req.Requirement, "message"));
         }
 
         return new CreateSubscriptionResponse(id, secret, ticks, interval, expiresAt);
