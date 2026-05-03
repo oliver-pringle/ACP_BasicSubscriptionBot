@@ -22,5 +22,11 @@ data/*.db-shm
 data/*.db-wal
 !data/.gitkeep
 
+# Stray SQLite from `dotnet run` in dev (default appsettings uses relative path)
+BasicSubscriptionBot.Api/*.db
+BasicSubscriptionBot.Api/*.db-journal
+BasicSubscriptionBot.Api/*.db-shm
+BasicSubscriptionBot.Api/*.db-wal
+
 # OS
 Thumbs.db
