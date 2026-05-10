@@ -11,6 +11,7 @@ export const tickEcho: Offering = {
   name: "tick_echo",
   description:
     "Push a fixed message to your webhook every N seconds for K ticks. Subscription offering — pay upfront for the full tick budget. Demonstrates the BasicSubscriptionBot worker-loop + webhook + HMAC pattern end-to-end.",
+  slaMinutes: 5, // subscription hire is instant; per-tick is governed by intervalSeconds
   requirementSchema: {
     type: "object",
     properties: {
@@ -20,6 +21,35 @@ export const tickEcho: Offering = {
       ticks:           { type: "integer", minimum: 1, maximum: MAX_TICKS, description: "Number of ticks (deliveries) to purchase." }
     },
     required: ["message", "webhookUrl", "intervalSeconds", "ticks"]
+  },
+  requirementExample: {
+    message: "hello world",
+    webhookUrl: "https://buyer.example.com/webhook",
+    intervalSeconds: 3600,
+    ticks: 24
+  },
+  // Subscription deliverable = the receipt submitted on the ACP job at hire time.
+  // Per-tick webhook payloads (and their HMAC headers) are pushed directly to the
+  // buyer's webhookUrl — they don't traverse ACP and aren't part of this schema.
+  deliverableSchema: {
+    type: "object",
+    properties: {
+      subscriptionId:  { type: "string",  description: "UUID identifying this subscription." },
+      webhookSecret:   { type: "string",  description: "32-byte hex HMAC-SHA256 secret. Returned ONCE — buyer must persist." },
+      ticksPurchased:  { type: "integer", description: "Total ticks the buyer paid for." },
+      intervalSeconds: { type: "integer", description: "Seconds between ticks." },
+      expiresAt:       { type: "string",  description: "ISO-8601 UTC. Subscription auto-completes after this." },
+      signatureScheme: { type: "string",  description: "Constant: HMAC-SHA256(secret, tick + '.' + timestamp + '.' + body)" }
+    },
+    required: ["subscriptionId", "webhookSecret", "ticksPurchased", "intervalSeconds", "expiresAt", "signatureScheme"]
+  },
+  deliverableExample: {
+    subscriptionId: "8f3d5a2c-9e1b-4d7a-b2c6-1f4e8a9d3c70",
+    webhookSecret:  "a1b2c3d4e5f60708091a2b3c4d5e6f708192a3b4c5d6e7f80910a1b2c3d4e5f6",
+    ticksPurchased: 24,
+    intervalSeconds: 3600,
+    expiresAt: "2026-05-05T14:23:11.4127831Z",
+    signatureScheme: "HMAC-SHA256(secret, tick + '.' + timestamp + '.' + body)"
   },
   validate(req) {
     const m = requireStringLength(req.message, "message", MAX_MESSAGE_LENGTH);
@@ -39,6 +69,9 @@ export const tickEcho: Offering = {
     pricePerTickUsdc: PRICE_PER_TICK_USDC,
     minIntervalSeconds: MIN_INTERVAL_SECONDS,
     maxTicks: MAX_TICKS,
-    maxDurationDays: MAX_DURATION_DAYS
+    maxDurationDays: MAX_DURATION_DAYS,
+    tiers: [
+      { name: "weekly_hourly", priceUsd: 1.68, durationDays: 7 }  // 168 ticks × $0.01
+    ]
   }
 };

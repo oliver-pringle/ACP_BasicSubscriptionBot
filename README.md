@@ -66,7 +66,7 @@ $env:ALLOW_INSECURE_WEBHOOKS = "true"
 4. Replace stub offerings:
    - Delete `tick_echo.ts` (or keep + add your own).
    - Delete `tick_echo_state` table + `TickEchoRepository` if not needed.
-   - Add your real subscription offerings to `src/offerings/`, register in `registry.ts`.
+   - Add your real subscription offerings to `src/offerings/`, register in `registry.ts`. Every `Offering` carries `slaMinutes` (min 5), `requirementSchema`, `requirementExample`, `deliverableSchema`, and `deliverableExample` — fill all of them from the C# response model (camelCase keys via ASP.NET Core's web defaults). Subscription offerings ALSO declare a `subscription.tiers` list of `{name, priceUsd, durationDays}` (duration in {7, 15, 30, 90} days) which becomes the marketplace registration tier list. For subscription offerings the deliverable shape is the **subscription receipt** returned at hire time, not the per-tick webhook payload.
    - Update `TickExecutorService.cs` to route by your offering names.
    - Update `pricing.ts` and validators if your subscription has different bounds.
 5. If you don't need the one-shot path: delete `echo.ts`, `EchoRepository.cs`, `EchoService.cs`, `EchoRecord.cs`, `echo_records` table, `/echo` endpoints.
