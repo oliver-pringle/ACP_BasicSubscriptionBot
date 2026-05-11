@@ -16,6 +16,14 @@ public class Db
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
+        // busy_timeout is per-connection (resets on each Open). Wait up to 5s
+        // on writer contention instead of throwing SQLITE_BUSY immediately.
+        // Especially important for BSB: the TickScheduler worker writes
+        // concurrently with sidecar-driven hires through SubscriptionRepository.
+        // WAL mode is file-level and set once in InitializeSchemaAsync.
+        using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA busy_timeout = 5000;";
+        pragma.ExecuteNonQuery();
         return conn;
     }
 
@@ -23,6 +31,15 @@ public class Db
     {
         await using var conn = OpenConnection();
         await using var cmd = conn.CreateCommand();
+        // WAL is persistent at the file level — set once, sticks across
+        // restarts. Lets readers and writers run concurrently (only
+        // writer-writer is serialised through a small WAL file). Critical
+        // for BSB because the TickScheduler fans out up to MaxConcurrent=8
+        // webhook deliveries in parallel, each writing back run state.
+        // Requires the SQLite file to live on local disk (not NFS/SMB).
+        cmd.CommandText = "PRAGMA journal_mode = WAL;";
+        await cmd.ExecuteNonQueryAsync();
+
         cmd.CommandText = @"
             CREATE TABLE IF NOT EXISTS subscriptions (
                 id                   TEXT PRIMARY KEY,
