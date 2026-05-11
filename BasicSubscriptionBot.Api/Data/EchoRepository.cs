@@ -29,4 +29,18 @@ public class EchoRepository
         if (!await reader.ReadAsync()) return null;
         return new EchoRecord(reader.GetInt64(0), reader.GetString(1), DateTime.Parse(reader.GetString(2)).ToUniversalTime());
     }
+
+    public async Task<(long Count, DateTime? LastReceivedAtUtc)> GetStatusAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*), MAX(received_at) FROM echo_records;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return (0, null);
+        var count = reader.GetInt64(0);
+        DateTime? lastAt = reader.IsDBNull(1)
+            ? null
+            : DateTime.Parse(reader.GetString(1)).ToUniversalTime();
+        return (count, lastAt);
+    }
 }

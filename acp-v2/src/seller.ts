@@ -7,6 +7,9 @@ import { route } from "./router.js";
 import { priceForAssetToken } from "./pricing.js";
 import { toDeliverable } from "./deliverable.js";
 import { listOfferings, getOffering } from "./offerings/registry.js";
+import { listResources } from "./resources.js";
+import { ensureDelegation } from "./walletDelegation.js";
+import { getChain } from "./chain.js";
 
 type PendingJob = {
   offeringName: string;
@@ -20,9 +23,25 @@ async function main() {
   console.log(`[seller] chain=${env.chain} wallet=${env.walletAddress}`);
   console.log(`[seller] api=${env.apiUrl}`);
   console.log(`[seller] offerings registered (in code): ${listOfferings().length}`);
+  console.log(`[seller] resources registered (in code): ${listResources().length}`);
 
   const provider = await createProvider(env);
   const agent = await AcpAgent.create({ provider });
+
+  // Guard against EIP-7702 delegation drift. The ACP v2 SDK only recognises
+  // wallets delegated to Alchemy ModularAccountV2; any other delegation
+  // causes the next hire to fail with `Expected bigint, got: N`. Empirically
+  // the drift triggers between PrivyAlchemyEvmProviderAdapter.create() and
+  // the first hire, so re-check AFTER agent setup and auto-recover if a
+  // DEPLOYER_PRIVATE_KEY sponsor is configured. See acp-v2/src/walletDelegation.ts
+  // and user-memory reference_acp_wallet_provisioning.md.
+  await ensureDelegation({
+    adapter: provider,
+    walletAddress: env.walletAddress,
+    chain: getChain(env.chain),
+    rpcUrl: env.baseRpcUrl,
+    deployerPrivateKey: env.deployerPrivateKey,
+  });
 
   const pending = new Map<string, PendingJob>();
 

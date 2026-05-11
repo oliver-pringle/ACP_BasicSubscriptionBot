@@ -52,7 +52,11 @@ if (!string.IsNullOrEmpty(apiKey))
     var expectedBytes = Encoding.UTF8.GetBytes(apiKey);
     app.Use(async (ctx, next) =>
     {
-        if (ctx.Request.Path == "/health") { await next(); return; }
+        // /health stays open for liveness/readiness probes.
+        // /v1/resources/* stays open so buyer / orchestrator agents (Butler etc.)
+        // can introspect the bot pre-hire — that's the whole point of Resources.
+        var path = ctx.Request.Path.Value ?? string.Empty;
+        if (path == "/health" || path.StartsWith("/v1/resources/", StringComparison.Ordinal)) { await next(); return; }
         if (!ctx.Request.Headers.TryGetValue("X-API-Key", out var provided))
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -123,6 +127,25 @@ app.MapGet("/subscriptions/{id}", async (string id, SubscriptionRepository repo)
 {
     var sub = await repo.GetByIdAsync(id);
     return sub is null ? Results.NotFound() : Results.Ok(sub);
+});
+
+// ACP v2 Resources — public, free, parameterised endpoints mirrored
+// 1:1 with entries in acp-v2/src/resources.ts. Buyer / orchestrator agents
+// (Butler etc.) call these BEFORE paying for an offering, so handlers must
+// be cheap, side-effect-free, and stable. Add new routes here in lockstep
+// with new entries in acp-v2/src/resources.ts; run `npm run print-resources`
+// in acp-v2/ and paste each block into app.virtuals.io's Resources tab.
+//
+// Resources stay reachable even when the X-API-Key middleware is on —
+// the middleware above whitelists /v1/resources/* alongside /health.
+app.MapGet("/v1/resources/echoStatus", async (EchoRepository repo) =>
+{
+    var (count, lastAt) = await repo.GetStatusAsync();
+    return Results.Ok(new
+    {
+        count,
+        lastEchoAt = lastAt?.ToString("O")
+    });
 });
 
 app.Run();

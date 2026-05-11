@@ -58,6 +58,37 @@ $env:ALLOW_INSECURE_WEBHOOKS = "true"
 
 (Same 7 acceptance tests as in `docs/superpowers/specs/2026-05-03-acp-basicsubscriptionbot-boilerplate-design.md`.)
 
+## Wallet delegation guard (EIP-7702)
+
+The sidecar runs a boot-time delegation check before accepting any hires. The
+ACP v2 SDK (`acp-node-v2 ^0.0.6`) only recognises wallets delegated to Alchemy
+ModularAccountV2 (`0x69007702764179f14F51cdce752f4f775d74E139`). Privy WaaS
+occasionally rotates a wallet to a different impl; when that happens, the next
+hire fails inside the SDK with `Expected bigint, got: N` from a HexBigInt
+typebox encoder that's been fed the wallet's raw integer nonce.
+
+`acp-v2/src/walletDelegation.ts` makes the sidecar self-defending against this:
+
+- **On every boot:** one `eth_getBytecode` call probes the wallet. If the
+  delegation prefix (`0xef0100…`) points at ModularAccountV2, the sidecar
+  carries on. If not, it either auto-recovers or refuses to start.
+- **Auto-recovery (recommended):** set `DEPLOYER_PRIVATE_KEY` in
+  `acp-v2/.env`. The guard signs a fresh 7702 authorization via Privy's
+  `signer.signAuthorization` and broadcasts a sponsored type-4 tx from the
+  deployer EOA. The deployer pays gas (~0.001 ETH per recovery, rare in
+  practice). No on-chain tx when delegation is already correct — idempotent.
+- **Without a deployer key:** the guard throws on drift with a recovery
+  message pointing at `scripts/provision-7702.ts` for a manual one-shot.
+
+`BASE_RPC_URL` in `acp-v2/.env` overrides the public RPC the probe uses
+(defaults to publicnode). Even a free RPC is fine — one call per boot.
+
+The guard is wired into `seller.ts` right after `AcpAgent.create(...)`. Do
+not remove it. The pattern is shared with ChainlinkBot, where it was
+battle-tested through the 2026-05-11 Base mainnet cutover. Especially
+important for subscription bots — a wallet drift between subscription
+hires would silently break a multi-tick subscription mid-run.
+
 ## Cloning for a new bot
 
 1. Copy `ACP_BasicSubscriptionBot/` → `ACP_MyNewBot/`
@@ -69,8 +100,11 @@ $env:ALLOW_INSECURE_WEBHOOKS = "true"
    - Add your real subscription offerings to `src/offerings/`, register in `registry.ts`. Every `Offering` carries `slaMinutes` (min 5), `requirementSchema`, `requirementExample`, `deliverableSchema`, and `deliverableExample` — fill all of them from the C# response model (camelCase keys via ASP.NET Core's web defaults). Subscription offerings ALSO declare a `subscription.tiers` list of `{name, priceUsd, durationDays}` (duration in {7, 15, 30, 90} days) which becomes the marketplace registration tier list. For subscription offerings the deliverable shape is the **subscription receipt** returned at hire time, not the per-tick webhook payload.
    - Update `TickExecutorService.cs` to route by your offering names.
    - Update `pricing.ts` and validators if your subscription has different bounds.
-5. If you don't need the one-shot path: delete `echo.ts`, `EchoRepository.cs`, `EchoService.cs`, `EchoRecord.cs`, `echo_records` table, `/echo` endpoints.
-6. `npm run print-offerings` and register on app.virtuals.io.
+5. If you don't need the one-shot path: delete `echo.ts`, `EchoRepository.cs`, `EchoService.cs`, `EchoRecord.cs`, `echo_records` table, `/echo` endpoints, and the `/v1/resources/echoStatus` route + `echoStatus` entry in `src/resources.ts`.
+6. Replace the TS resources (optional — delete the example if your bot won't expose any):
+   - `acp-v2/src/resources.ts` → your real resources. Resources are public, free, parameterised endpoints buyer / orchestrator agents (Butler etc.) call BEFORE paying for an offering. The example `echoStatus` shows the pattern: declare metadata here, wire the matching `/v1/resources/<name>` handler in `Program.cs`.
+   - The X-API-Key middleware in `Program.cs` already whitelists `/v1/resources/*` so resources stay reachable when auth is on.
+7. `npm run print-offerings` and register on app.virtuals.io. If you have resources, also run `npm run print-resources` and paste each block into the dashboard's Resources tab.
 
 ## What's intentionally NOT in this shell
 
