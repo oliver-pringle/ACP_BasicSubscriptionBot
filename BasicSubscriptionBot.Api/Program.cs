@@ -44,10 +44,26 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// Optional X-API-Key middleware (off by default)
+// X-API-Key middleware. Required in any non-Development environment — a fail-
+// open default plus a bad .env deploy or env-load failure would silently expose
+// every endpoint. In Development the bot is still allowed to start without a
+// key, with a loud warning, so local clones don't need configuration to boot.
 var apiKey = builder.Configuration["ApiKey"]
     ?? Environment.GetEnvironmentVariable("BASICSUBSCRIPTIONBOT_API_KEY");
-if (!string.IsNullOrEmpty(apiKey))
+if (string.IsNullOrEmpty(apiKey))
+{
+    if (!app.Environment.IsDevelopment())
+    {
+        throw new InvalidOperationException(
+            "BASICSUBSCRIPTIONBOT_API_KEY is required in non-Development environments. " +
+            $"Current environment: {app.Environment.EnvironmentName}. Set the env var " +
+            "(or `ApiKey` in configuration) to a high-entropy random string.");
+    }
+    app.Logger.LogWarning(
+        "BASICSUBSCRIPTIONBOT_API_KEY not set — Development mode only. " +
+        "Endpoints accept all callers. Set the env var before any non-local deployment.");
+}
+else
 {
     var expectedBytes = Encoding.UTF8.GetBytes(apiKey);
     app.Use(async (ctx, next) =>
@@ -74,12 +90,6 @@ if (!string.IsNullOrEmpty(apiKey))
         await next();
     });
     app.Logger.LogInformation("X-API-Key middleware enabled.");
-}
-else
-{
-    app.Logger.LogWarning(
-        "BASICSUBSCRIPTIONBOT_API_KEY not set — endpoints accept all callers. " +
-        "Safe ONLY when the API stays on a private docker network.");
 }
 
 app.MapGet("/health", () => Results.Ok(new
@@ -126,7 +136,7 @@ app.MapPost("/subscriptions", async (CreateSubscriptionRequest req, Subscription
 app.MapGet("/subscriptions/{id}", async (string id, SubscriptionRepository repo) =>
 {
     var sub = await repo.GetByIdAsync(id);
-    return sub is null ? Results.NotFound() : Results.Ok(sub);
+    return sub is null ? Results.NotFound() : Results.Ok(SubscriptionView.From(sub));
 });
 
 // ACP v2 Resources — public, free, parameterised endpoints mirrored

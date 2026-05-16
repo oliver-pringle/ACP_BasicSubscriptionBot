@@ -54,6 +54,13 @@ For local subscription testing without HTTPS:
 $env:ALLOW_INSECURE_WEBHOOKS = "true"
 ```
 
+## Security defaults (do not deviate without explicit reason)
+
+- **`BASICSUBSCRIPTIONBOT_API_KEY` is required in any non-Development environment.** The boot will throw `InvalidOperationException` if `ASPNETCORE_ENVIRONMENT != "Development"` and the env var is unset, so a misconfigured droplet deploy can't silently start in fail-open mode. In Development the bot still boots without it (with a loud warning) so local clones work out-of-the-box.
+- **`webhookUrl` is SSRF-validated on subscribe + on every delivery tick.** `Services/WebhookUrlValidator.cs` rejects loopback, RFC1918, link-local (incl. the AWS/GCP/Azure metadata IP `169.254.169.254`), IPv6 ULA/link-local, carrier-grade NAT, and any non-`https://` scheme. DNS is resolved at validate-time and every resolved address is checked. Set `ALLOW_INSECURE_WEBHOOKS=true` to bypass — dev/test only.
+- **Subscription inputs are bounded** in `SubscriptionService.CreateAsync`: `intervalSeconds` 60..86400, `ticks` 1..10000, total window ≤90 days, `requirementJson` ≤16 KB. Bump constants per-bot only if a specific offering needs different shape.
+- **`GET /subscriptions/{id}` returns `SubscriptionView`, not `Subscription`.** The full record holds the HMAC `WebhookSecret` used by buyers to verify tick deliveries — never echo it over an unauthenticated route, or anyone with the subscriptionId can forge ticks.
+
 ## Smoke tests
 
 (Same 7 acceptance tests as in `docs/superpowers/specs/2026-05-03-acp-basicsubscriptionbot-boilerplate-design.md`.)

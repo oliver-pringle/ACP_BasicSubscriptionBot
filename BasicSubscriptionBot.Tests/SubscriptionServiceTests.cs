@@ -2,13 +2,24 @@ using System.Text.Json;
 using BasicSubscriptionBot.Api.Data;
 using BasicSubscriptionBot.Api.Models;
 using BasicSubscriptionBot.Api.Services;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 namespace BasicSubscriptionBot.Tests;
 
 public class SubscriptionServiceTests
 {
-    private static CreateSubscriptionRequest TickEchoReq(int ticks, int interval)
+    // ALLOW_INSECURE_WEBHOOKS=true bypasses the SSRF guard so tests can use
+    // `https://buyer.test/cb` (doesn't resolve in CI). Production must leave it unset.
+    private static IConfiguration InsecureConfig() =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ALLOW_INSECURE_WEBHOOKS"] = "true" })
+            .Build();
+
+    private static SubscriptionService NewSvc(TestDb t) =>
+        new(new SubscriptionRepository(t.Db), new TickEchoRepository(t.Db), InsecureConfig());
+
+    private static CreateSubscriptionRequest TickEchoReq(int ticks, int interval, string webhook = "https://buyer.test/cb")
         => new(
             JobId: "job-x",
             BuyerAgent: "0xbuyer",
@@ -16,7 +27,7 @@ public class SubscriptionServiceTests
             Requirement: new Dictionary<string, object>
             {
                 ["message"]         = "ping",
-                ["webhookUrl"]      = "https://buyer.test/cb",
+                ["webhookUrl"]      = webhook,
                 ["intervalSeconds"] = interval,
                 ["ticks"]           = ticks
             }
@@ -27,9 +38,7 @@ public class SubscriptionServiceTests
     {
         await using var t = TestDb.New();
         await t.Db.InitializeSchemaAsync();
-        var svc = new SubscriptionService(
-            new SubscriptionRepository(t.Db),
-            new TickEchoRepository(t.Db));
+        var svc = NewSvc(t);
 
         var resp = await svc.CreateAsync(TickEchoReq(ticks: 5, interval: 60));
 
@@ -46,7 +55,7 @@ public class SubscriptionServiceTests
         await t.Db.InitializeSchemaAsync();
         var subs = new SubscriptionRepository(t.Db);
         var te = new TickEchoRepository(t.Db);
-        var svc = new SubscriptionService(subs, te);
+        var svc = new SubscriptionService(subs, te, InsecureConfig());
 
         var resp = await svc.CreateAsync(TickEchoReq(3, 60));
         var state = await te.GetAsync(resp.SubscriptionId);
@@ -59,9 +68,7 @@ public class SubscriptionServiceTests
     {
         await using var t = TestDb.New();
         await t.Db.InitializeSchemaAsync();
-        var svc = new SubscriptionService(
-            new SubscriptionRepository(t.Db),
-            new TickEchoRepository(t.Db));
+        var svc = NewSvc(t);
 
         var bad = new CreateSubscriptionRequest(
             "j", "0x", "unknown",
@@ -81,7 +88,7 @@ public class SubscriptionServiceTests
         await using var t = TestDb.New();
         await t.Db.InitializeSchemaAsync();
         var subs = new SubscriptionRepository(t.Db);
-        var svc = new SubscriptionService(subs, new TickEchoRepository(t.Db));
+        var svc = new SubscriptionService(subs, new TickEchoRepository(t.Db), InsecureConfig());
 
         var bad = new CreateSubscriptionRequest(
             "j", "0x", "unknown",
@@ -97,5 +104,69 @@ public class SubscriptionServiceTests
         // Verify NO subscription rows were created
         var due = await subs.GetDueAsync(DateTime.UtcNow.AddDays(365), limit: 100);
         Assert.Empty(due);
+    }
+
+    // --- Bounds & SSRF coverage ---
+
+    [Theory]
+    [InlineData(59)]      // below MinIntervalSeconds
+    [InlineData(86_401)]  // above MaxIntervalSeconds
+    public async Task Create_rejects_interval_outside_bounds(int interval)
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickEchoReq(ticks: 1, interval: interval)));
+        Assert.Contains("intervalSeconds must be", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10_001)]
+    public async Task Create_rejects_ticks_outside_bounds(int ticks)
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickEchoReq(ticks: ticks, interval: 60)));
+        Assert.Contains("ticks must be", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_window_beyond_90_days()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        // 86400s * 100 ticks = 100 days > MaxFutureWindow
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickEchoReq(ticks: 100, interval: 86_400)));
+        Assert.Contains("90 days", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://buyer.test/cb")]           // plain http with insecure NOT allowed
+    [InlineData("https://127.0.0.1/cb")]           // loopback literal
+    [InlineData("https://169.254.169.254/cb")]     // cloud metadata
+    [InlineData("https://10.0.0.5/cb")]            // rfc1918
+    [InlineData("https://192.168.1.1/cb")]         // rfc1918
+    [InlineData("ftp://buyer.test/cb")]            // wrong scheme
+    [InlineData("not-a-url")]                      // invalid uri
+    public async Task Create_rejects_unsafe_webhook_url(string url)
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        // Force SSRF guard ON for this test by NOT passing the insecure config.
+        var svc = new SubscriptionService(
+            new SubscriptionRepository(t.Db),
+            new TickEchoRepository(t.Db));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickEchoReq(ticks: 1, interval: 60, webhook: url)));
     }
 }
