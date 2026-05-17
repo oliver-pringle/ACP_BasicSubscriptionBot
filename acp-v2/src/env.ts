@@ -10,6 +10,7 @@ export interface AcpEnv {
   builderCode?: string;
   baseRpcUrl: string;
   deployerPrivateKey?: string;
+  streamPushPort: number;
 }
 
 const REQUIRED = [
@@ -27,6 +28,12 @@ const DEFAULT_RPC: Record<ChainName, string> = {
   base: "https://base-rpc.publicnode.com",
   baseSepolia: "https://base-sepolia-rpc.publicnode.com",
 };
+
+// inJobStream PushMode internal HTTP listener default port. Matches the C#
+// tier's InJobStreamDeliveryService default BaseUrl (http://localhost:6001).
+// Override with BASICSUBSCRIPTIONBOT_STREAM_PUSH_PORT for non-default deploys
+// — must also update Services:StreamPush:BaseUrl on the C# side in lockstep.
+const DEFAULT_STREAM_PUSH_PORT = 6001;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
   for (const name of REQUIRED) {
@@ -61,6 +68,15 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
   const deployerPrivateKey =
     deployerRaw && deployerRaw.trim() !== "" ? deployerRaw : undefined;
 
+  const streamPortRaw = source.BASICSUBSCRIPTIONBOT_STREAM_PUSH_PORT;
+  let streamPushPort = DEFAULT_STREAM_PUSH_PORT;
+  if (streamPortRaw && streamPortRaw.trim() !== "") {
+    const parsed = Number.parseInt(streamPortRaw, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535)
+      throw new Error(`BASICSUBSCRIPTIONBOT_STREAM_PUSH_PORT must be 1..65535, got "${streamPortRaw}"`);
+    streamPushPort = parsed;
+  }
+
   return {
     walletAddress: source.ACP_WALLET_ADDRESS!,
     walletId: source.ACP_WALLET_ID!,
@@ -71,5 +87,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
     builderCode,
     baseRpcUrl,
     deployerPrivateKey,
+    streamPushPort,
   };
 }

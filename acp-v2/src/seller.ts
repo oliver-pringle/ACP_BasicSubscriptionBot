@@ -10,6 +10,7 @@ import { listOfferings, getOffering } from "./offerings/registry.js";
 import { listResources } from "./resources.js";
 import { ensureDelegation } from "./walletDelegation.js";
 import { getChain } from "./chain.js";
+import { startStreamPushServer } from "./streamPush.js";
 
 type PendingJob = {
   offeringName: string;
@@ -108,7 +109,7 @@ async function main() {
     }
 
     if (offering.subscription) {
-      // Subscription path: create subscription, submit receipt
+      const pushMode = offering.subscription.pushMode ?? "webhook";
       const buyerAgent = (session.job?.clientAddress ?? "0x").toString();
       let receipt;
       try {
@@ -116,12 +117,39 @@ async function main() {
           jobId: session.jobId,
           buyerAgent,
           offeringName: stash.offeringName,
-          requirement: stash.requirement
+          requirement: stash.requirement,
+          pushMode,
+          // For inJobStream: persist the chainId + jobId on the row so the
+          // C# tier can drive push-tick / submit-final back to us later.
+          ...(pushMode === "inJobStream"
+            ? { streamChainId: session.chainId, streamJobId: session.jobId.toString() }
+            : {})
         });
       } catch (err) {
         await session.sendMessage(`subscription creation failed: ${(err as Error).message}`);
         return;
       }
+
+      if (pushMode === "inJobStream") {
+        // Send the receipt as a structured AgentMessage on the OPEN job, and
+        // deliberately skip session.submit so the job stays in TRANSACTION
+        // state. The TickScheduler will drive subsequent ticks through the
+        // streamPush server; the final tick triggers submit on this same
+        // session via /v1/internal/submit-final.
+        const receiptJson = JSON.stringify({
+          subscriptionId:    receipt.subscriptionId,
+          ticksPurchased:    receipt.ticksPurchased,
+          intervalSeconds:   receipt.intervalSeconds,
+          expiresAt:         receipt.expiresAt,
+          deliveryMode:      "inJobStream",
+          streamProtocolHint:"AgentMessage(contentType='structured') per tick; final submit closes the job"
+        });
+        await session.sendMessage(receiptJson, "structured");
+        console.log(`[seller] kept job OPEN for stream sub jobId=${session.jobId} subId=${receipt.subscriptionId} (no submit)`);
+        return;
+      }
+
+      // webhook path (default): submit the receipt and end the job.
       const payload = await toDeliverable(session.jobId, {
         subscriptionId: receipt.subscriptionId,
         webhookSecret: receipt.webhookSecret,
@@ -143,11 +171,23 @@ async function main() {
     console.log(`[seller] submitted one-shot jobId=${session.jobId} offering=${stash.offeringName}`);
   }
 
+  // inJobStream PushMode: start the internal HTTP server BEFORE agent.start()
+  // so the C# tier (which boots in parallel) doesn't see a brief 502 window
+  // on its first push-tick attempt for a subscription created at startup.
+  const streamServer = startStreamPushServer({
+    agent,
+    apiKey: env.apiKey,
+    port: env.streamPushPort,
+  });
+
   await agent.start();
 
   const shutdown = async (signal: string) => {
     console.log(`[seller] ${signal} received, stopping agent`);
-    try { await agent.stop(); } finally { process.exit(0); }
+    try {
+      streamServer.close();
+      await agent.stop();
+    } finally { process.exit(0); }
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

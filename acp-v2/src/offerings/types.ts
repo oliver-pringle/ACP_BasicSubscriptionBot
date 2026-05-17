@@ -29,6 +29,17 @@ export interface SubscriptionConfig {
   /// Marketplace registration tiers. At least one. Buyer picks one at hire time.
   /// Required since 2026-05-10.
   tiers: SubscriptionTier[];
+
+  /// Delivery mode for per-tick payloads. Defaults to "webhook" — buyer
+  /// supplies an HTTPS URL in the requirement, bot HMAC-POSTs each tick.
+  /// "inJobStream" keeps the ACP job open after the subscription receipt
+  /// and pushes per-tick payloads as AgentMessage(contentType="structured")
+  /// over the SSE/WebSocket transport the SDK already holds — buyer needs
+  /// no webhook surface. See docs/superpowers/specs/2026-05-17-pushmode-
+  /// injobstream-design.md for the SDK semantics + Phase-1 verification
+  /// gate. Hard-capped to MaxStreamWindow (4h) on the C# tier until that
+  /// gate passes in production.
+  pushMode?: "webhook" | "inJobStream";
 }
 
 export interface Offering {
