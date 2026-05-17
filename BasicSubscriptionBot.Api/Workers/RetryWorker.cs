@@ -35,7 +35,8 @@ public class RetryWorker : BackgroundService
         await using var scope = _scopes.CreateAsyncScope();
         var runs = scope.ServiceProvider.GetRequiredService<SubscriptionRunRepository>();
         var subs = scope.ServiceProvider.GetRequiredService<SubscriptionRepository>();
-        var deliverer = scope.ServiceProvider.GetRequiredService<WebhookDeliveryService>();
+        var webhookDeliverer = scope.ServiceProvider.GetRequiredService<WebhookDeliveryService>();
+        var streamDeliverer = scope.ServiceProvider.GetRequiredService<InJobStreamDeliveryService>();
 
         var due = await runs.GetRetryDueAsync(DateTime.UtcNow, BatchSize);
         if (due.Count == 0) return;
@@ -45,7 +46,7 @@ public class RetryWorker : BackgroundService
         var tasks = due.Select(async run =>
         {
             await sem.WaitAsync(ct);
-            try { await ProcessRunAsync(run, runs, subs, deliverer, ct); }
+            try { await ProcessRunAsync(run, runs, subs, webhookDeliverer, streamDeliverer, ct); }
             finally { sem.Release(); }
         });
         await Task.WhenAll(tasks);
@@ -55,7 +56,8 @@ public class RetryWorker : BackgroundService
         Models.SubscriptionRun run,
         SubscriptionRunRepository runs,
         SubscriptionRepository subs,
-        WebhookDeliveryService deliverer,
+        WebhookDeliveryService webhookDeliverer,
+        InJobStreamDeliveryService streamDeliverer,
         CancellationToken ct)
     {
         var sub = await subs.GetByIdAsync(run.SubscriptionId);
@@ -66,7 +68,12 @@ public class RetryWorker : BackgroundService
             return;
         }
 
-        var result = await deliverer.DeliverAsync(sub, run.TickNumber, run.PayloadJson, ct);
+        DeliveryResult result = sub.PushMode switch
+        {
+            "inJobStream" => await streamDeliverer.PushAsync(sub, run.TickNumber, run.PayloadJson, ct),
+            _             => await webhookDeliverer.DeliverAsync(sub, run.TickNumber, run.PayloadJson, ct),
+        };
+
         if (result.Ok)
         {
             await runs.MarkDeliveredAsync(run.Id, DateTime.UtcNow);
@@ -78,7 +85,8 @@ public class RetryWorker : BackgroundService
         if (RetryBackoff.IsExhausted(nextAttempts))
         {
             await runs.MarkDeadAsync(run.Id, nextAttempts, result.Error ?? "max retries");
-            _logger.LogWarning("Run {Id} for sub {Sub} dead-lettered after {N} attempts", run.Id, sub.Id, nextAttempts);
+            _logger.LogWarning("Run {Id} for sub {Sub} mode={Mode} dead-lettered after {N} attempts",
+                run.Id, sub.Id, sub.PushMode, nextAttempts);
         }
         else
         {

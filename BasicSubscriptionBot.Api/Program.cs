@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using BasicSubscriptionBot.Api.Data;
 using BasicSubscriptionBot.Api.Models;
 using BasicSubscriptionBot.Api.Services;
@@ -21,6 +20,7 @@ builder.Services.AddSingleton<EchoService>();
 builder.Services.AddSingleton<SubscriptionService>();
 builder.Services.AddSingleton<TickExecutorService>();
 builder.Services.AddHttpClient<WebhookDeliveryService>();
+builder.Services.AddHttpClient<InJobStreamDeliveryService>();
 
 // Hosted workers
 builder.Services.AddHostedService<TickSchedulerWorker>();

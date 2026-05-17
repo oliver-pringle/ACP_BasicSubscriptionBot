@@ -2,7 +2,6 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using BasicSubscriptionBot.Api.Data;
 using BasicSubscriptionBot.Api.Models;
-using Microsoft.Extensions.Configuration;
 
 namespace BasicSubscriptionBot.Api.Services;
 
@@ -20,6 +19,18 @@ public class SubscriptionService
     public const int MaxRequirementJsonBytes = 16 * 1024;     // 16 KB
     public static readonly TimeSpan MaxFutureWindow = TimeSpan.FromDays(90);
 
+    // inJobStream-mode subscriptions keep an ACP job open for the entire
+    // delivery window. The V2 indexer's tolerance for long-open jobs is
+    // unverified beyond ~hours (see Phase-1 spec Q1). Hard-cap inJobStream
+    // windows much lower than the webhook cap until production data widens it.
+    public static readonly TimeSpan MaxStreamWindow = TimeSpan.FromHours(4);
+
+    // Offerings this bot exposes through the subscription path. Add new names
+    // here as they're registered in acp-v2/src/offerings/registry.ts; the
+    // service rejects unknown names rather than silently creating orphan rows.
+    private static readonly HashSet<string> KnownSubscriptionOfferings =
+        new(StringComparer.OrdinalIgnoreCase) { "tick_echo", "tick_stream_echo" };
+
     public SubscriptionService(SubscriptionRepository subs, TickEchoRepository tickEcho, IConfiguration? cfg = null)
     {
         _subs = subs;
@@ -30,16 +41,14 @@ public class SubscriptionService
 
     public async Task<CreateSubscriptionResponse> CreateAsync(CreateSubscriptionRequest req)
     {
-        // Validate offering name FIRST — fail fast before any DB writes or secret gen.
-        if (req.OfferingName != "tick_echo")
+        if (!KnownSubscriptionOfferings.Contains(req.OfferingName))
             throw new InvalidOperationException($"unknown offering: {req.OfferingName}");
+
+        var pushMode = NormalisePushMode(req.PushMode);
 
         var ticks = AsInt(req.Requirement, "ticks");
         var interval = AsInt(req.Requirement, "intervalSeconds");
-        var webhookUrl = AsString(req.Requirement, "webhookUrl");
 
-        // Bounds checks BEFORE the secret gen + DB insert so callers get
-        // actionable 4xx rather than orphan state.
         if (interval < MinIntervalSeconds || interval > MaxIntervalSeconds)
             throw new InvalidOperationException(
                 $"intervalSeconds must be {MinIntervalSeconds}..{MaxIntervalSeconds}");
@@ -47,23 +56,52 @@ public class SubscriptionService
             throw new InvalidOperationException($"ticks must be 1..{MaxTicks}");
 
         var windowSeconds = (long)interval * ticks;
-        if (windowSeconds > (long)MaxFutureWindow.TotalSeconds)
+        var windowCap = pushMode == "inJobStream"
+            ? (long)MaxStreamWindow.TotalSeconds
+            : (long)MaxFutureWindow.TotalSeconds;
+        if (windowSeconds > windowCap)
+        {
+            var capLabel = pushMode == "inJobStream"
+                ? $"{MaxStreamWindow.TotalHours} hours (inJobStream cap)"
+                : $"{MaxFutureWindow.TotalDays} days";
             throw new InvalidOperationException(
-                $"interval × ticks ({windowSeconds}s) exceeds {MaxFutureWindow.TotalDays} days");
+                $"interval × ticks ({windowSeconds}s) exceeds {capLabel}");
+        }
 
         var requirementJson = JsonSerializer.Serialize(req.Requirement);
         if (System.Text.Encoding.UTF8.GetByteCount(requirementJson) > MaxRequirementJsonBytes)
             throw new InvalidOperationException(
                 $"requirement JSON exceeds {MaxRequirementJsonBytes} bytes");
 
-        // SSRF guard: reject loopback / RFC1918 / link-local / metadata / IPv6 ULA
-        // unless ALLOW_INSECURE_WEBHOOKS=true (dev only).
-        var urlCheck = WebhookUrlValidator.Validate(webhookUrl, _allowInsecureWebhooks);
-        if (!urlCheck.Ok)
-            throw new InvalidOperationException(urlCheck.Error!);
+        // Webhook-specific validation: URL + SSRF guard + per-secret HMAC seed.
+        // For inJobStream, the ACP job + transport replaces these — no buyer-
+        // hosted URL exists, so the validator and secret allocation are skipped.
+        string? webhookUrl = null;
+        string? webhookSecret = null;
+        int? streamChainId = null;
+        string? streamJobId = null;
+
+        if (pushMode == "webhook")
+        {
+            webhookUrl = AsString(req.Requirement, "webhookUrl");
+            var urlCheck = WebhookUrlValidator.Validate(webhookUrl, _allowInsecureWebhooks);
+            if (!urlCheck.Ok)
+                throw new InvalidOperationException(urlCheck.Error!);
+            webhookSecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        }
+        else // inJobStream
+        {
+            if (req.StreamChainId is null || req.StreamChainId.Value <= 0)
+                throw new InvalidOperationException(
+                    "inJobStream subscriptions require streamChainId (chain the funded job is on)");
+            if (string.IsNullOrWhiteSpace(req.StreamJobId))
+                throw new InvalidOperationException(
+                    "inJobStream subscriptions require streamJobId (on-chain job id of the kept-open job)");
+            streamChainId = req.StreamChainId;
+            streamJobId   = req.StreamJobId;
+        }
 
         var id = Guid.NewGuid().ToString("N");
-        var secret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         var now = DateTime.UtcNow;
         var expiresAt = now.AddSeconds(windowSeconds);
         var nextRunAt = now.AddSeconds(interval);
@@ -75,7 +113,7 @@ public class SubscriptionService
             OfferingName: req.OfferingName,
             RequirementJson: requirementJson,
             WebhookUrl: webhookUrl,
-            WebhookSecret: secret,
+            WebhookSecret: webhookSecret,
             IntervalSeconds: interval,
             TicksPurchased: ticks,
             TicksDelivered: 0,
@@ -84,17 +122,34 @@ public class SubscriptionService
             LastRunAt: null,
             NextRunAt: nextRunAt,
             Status: "active",
-            ConsecutiveFailures: 0
+            ConsecutiveFailures: 0,
+            PushMode: pushMode,
+            StreamChainId: streamChainId,
+            StreamJobId: streamJobId
         );
         await _subs.InsertAsync(sub);
 
-        // Per-offering state (offering name already validated above)
-        if (req.OfferingName == "tick_echo")
+        // tick_echo and tick_stream_echo share per-subscription state: the
+        // message echoed on every tick. Both flow through the same repository
+        // so the executor doesn't care which offering it is — only delivery
+        // mode differs.
+        if (req.OfferingName.Equals("tick_echo", StringComparison.OrdinalIgnoreCase) ||
+            req.OfferingName.Equals("tick_stream_echo", StringComparison.OrdinalIgnoreCase))
         {
             await _tickEcho.InsertAsync(id, AsString(req.Requirement, "message"));
         }
 
-        return new CreateSubscriptionResponse(id, secret, ticks, interval, expiresAt);
+        return new CreateSubscriptionResponse(id, webhookSecret, ticks, interval, expiresAt, pushMode);
+    }
+
+    private static string NormalisePushMode(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "webhook";
+        var v = raw.Trim();
+        if (v.Equals("webhook", StringComparison.OrdinalIgnoreCase)) return "webhook";
+        if (v.Equals("inJobStream", StringComparison.OrdinalIgnoreCase)) return "inJobStream";
+        throw new InvalidOperationException(
+            $"pushMode must be 'webhook' or 'inJobStream', got '{raw}'");
     }
 
     private static int AsInt(Dictionary<string, object> d, string key)

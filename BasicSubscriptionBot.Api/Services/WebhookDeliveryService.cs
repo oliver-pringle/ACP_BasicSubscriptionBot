@@ -2,7 +2,6 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using BasicSubscriptionBot.Api.Models;
-using Microsoft.Extensions.Configuration;
 
 namespace BasicSubscriptionBot.Api.Services;
 
@@ -34,6 +33,14 @@ public class WebhookDeliveryService
     {
         if (Encoding.UTF8.GetByteCount(bodyJson) > BodyCapBytes)
             return new DeliveryResult(false, $"payload exceeds {BodyCapBytes} bytes");
+
+        // Defence in depth — the TickScheduler routes inJobStream rows to
+        // InJobStreamDeliveryService instead, so this method should never
+        // see one. If it does (race / config drift / new caller), refuse
+        // rather than dereference null WebhookUrl/WebhookSecret.
+        if (string.IsNullOrEmpty(sub.WebhookUrl) || string.IsNullOrEmpty(sub.WebhookSecret))
+            return new DeliveryResult(false,
+                $"subscription {sub.Id} has no webhook configuration (pushMode={sub.PushMode})");
 
         // Re-validate at delivery time. The subscribe endpoint validates on
         // insert, but a) older rows may pre-date the check, b) DNS for the
