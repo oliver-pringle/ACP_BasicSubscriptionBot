@@ -23,6 +23,10 @@ acp-v2/   (Node 22 / TypeScript)            BasicSubscriptionBot.Api/   (.NET 10
 
 ## How a subscription works
 
+Two delivery modes are supported. Each subscription offering opts in via `SubscriptionConfig.pushMode`; default is `webhook`.
+
+### `pushMode: "webhook"` (default, battle-tested)
+
 1. Buyer hires a subscription offering (e.g. `tick_echo`) with `{ ticks: 24, intervalSeconds: 3600, webhookUrl, ... }`.
 2. Sidecar validates, computes price `pricePerTickUsdc × ticks`, calls `setBudget`.
 3. Buyer funds. Sidecar calls `POST /subscriptions` on the C# API.
@@ -30,6 +34,18 @@ acp-v2/   (Node 22 / TypeScript)            BasicSubscriptionBot.Api/   (.NET 10
 5. Sidecar `submit()`s a **subscription receipt** containing `subscriptionId` + `webhookSecret`. ACP job done.
 6. `TickSchedulerWorker` fires on schedule, computes the tick payload, POSTs to the buyer's webhook with HMAC headers.
 7. After N ticks: subscription marked `completed`. Done.
+
+### `pushMode: "inJobStream"` (Phase-1, gated)
+
+1. Buyer hires a subscription offering (e.g. `tick_stream_echo`) with `{ ticks: 5, intervalSeconds: 60, message }` — **no webhookUrl needed**.
+2. Sidecar validates, prices, calls `setBudget`.
+3. Buyer funds. Sidecar calls `POST /subscriptions` with `pushMode: "inJobStream"` + `streamChainId` + `streamJobId`.
+4. C# inserts a row WITHOUT generating an HMAC secret; persists chainId + jobId.
+5. Sidecar sends the subscription receipt as an `AgentMessage(contentType="structured")` on the open job and **deliberately does NOT call `submit()`**. The ACP job stays in `TRANSACTION` state.
+6. `TickSchedulerWorker` fires on schedule, computes the tick payload, POSTs to the sidecar's internal `/v1/internal/push-tick` (port 6001), which calls `agent.sendMessage(chainId, jobId, payload, "structured")`. Buyer's `AcpAgent.on("entry", handler)` fires.
+7. After N ticks: scheduler POSTs to `/v1/internal/submit-final`, sidecar calls `session.submit(finalReceipt)`, ACP job closes.
+
+inJobStream mode is **hard-capped to 4 hours per subscription** (`MaxStreamWindow`) until the Phase-1 SDK verification gate completes — see `docs/superpowers/specs/2026-05-17-pushmode-injobstream-design.md` for the three open questions (Q1 long-lived TRANSACTION tolerance, Q2 slaMinutes upper bound, Q3 SSE reconnect dedup) and the smoke checklist for promotion to production rollout on ChainlinkBot / MEVProtect / etc.
 
 ## Local development
 
@@ -117,9 +133,10 @@ hires would silently break a multi-tick subscription mid-run.
 
 - Cancellation / refunds (subscription runs to completion)
 - EAS attestation per tick (left as `// TODO:` — opt in per bot via the `acp-shared` network into ACP_EASIssuer)
-- Pull-fallback delivery (webhook only)
+- Pull-fallback delivery and durable buyer-side catch-up for inJobStream (Phase 1 v1 = lost ticks on buyer-side disconnect are silently dropped; defer `gap_fill` resource to v1.1)
 - Subscription renewal (buyer hires again)
 - Multi-replica / leader election (single replica per bot)
+- `sendJobMessage` (transport push, fire-and-forget) for streams — Phase 1 uses the awaitable REST fallback `sendMessage` for delivery confidence; switch per-offering in Phase 2+ if sub-second latency matters
 
 ## Security
 

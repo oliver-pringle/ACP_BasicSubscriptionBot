@@ -1,4 +1,3 @@
-using System.Text.Json;
 using BasicSubscriptionBot.Api.Data;
 using BasicSubscriptionBot.Api.Models;
 using BasicSubscriptionBot.Api.Services;
@@ -43,9 +42,11 @@ public class SubscriptionServiceTests
         var resp = await svc.CreateAsync(TickEchoReq(ticks: 5, interval: 60));
 
         Assert.False(string.IsNullOrEmpty(resp.SubscriptionId));
-        Assert.Equal(64, resp.WebhookSecret.Length);  // 32 bytes hex = 64 chars
+        Assert.NotNull(resp.WebhookSecret);
+        Assert.Equal(64, resp.WebhookSecret!.Length);  // 32 bytes hex = 64 chars
         Assert.Equal(5, resp.TicksPurchased);
         Assert.Equal(60, resp.IntervalSeconds);
+        Assert.Equal("webhook", resp.PushMode);
     }
 
     [Fact]
@@ -168,5 +169,144 @@ public class SubscriptionServiceTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => svc.CreateAsync(TickEchoReq(ticks: 1, interval: 60, webhook: url)));
+    }
+
+    // ---------------- inJobStream PushMode coverage ----------------
+
+    private static CreateSubscriptionRequest TickStreamReq(
+        int ticks, int interval,
+        int? streamChainId = 84532,
+        string? streamJobId = "12345")
+        => new(
+            JobId: "job-x",
+            BuyerAgent: "0xbuyer",
+            OfferingName: "tick_stream_echo",
+            Requirement: new Dictionary<string, object>
+            {
+                ["message"]         = "ping",
+                ["intervalSeconds"] = interval,
+                ["ticks"]           = ticks
+            },
+            PushMode: "inJobStream",
+            StreamChainId: streamChainId,
+            StreamJobId: streamJobId
+        );
+
+    [Fact]
+    public async Task Create_inJobStream_omits_webhook_secret_and_returns_pushMode()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var resp = await svc.CreateAsync(TickStreamReq(ticks: 5, interval: 60));
+
+        Assert.False(string.IsNullOrEmpty(resp.SubscriptionId));
+        Assert.Null(resp.WebhookSecret);
+        Assert.Equal("inJobStream", resp.PushMode);
+        Assert.Equal(5, resp.TicksPurchased);
+    }
+
+    [Fact]
+    public async Task Create_inJobStream_persists_chainId_and_jobId_on_row()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var subs = new SubscriptionRepository(t.Db);
+        var svc = new SubscriptionService(subs, new TickEchoRepository(t.Db), InsecureConfig());
+
+        var resp = await svc.CreateAsync(TickStreamReq(ticks: 3, interval: 60, streamChainId: 8453, streamJobId: "0xabc"));
+        var row = await subs.GetByIdAsync(resp.SubscriptionId);
+
+        Assert.NotNull(row);
+        Assert.Equal("inJobStream", row!.PushMode);
+        Assert.Equal(8453, row.StreamChainId);
+        Assert.Equal("0xabc", row.StreamJobId);
+        Assert.Null(row.WebhookUrl);
+        Assert.Null(row.WebhookSecret);
+    }
+
+    [Fact]
+    public async Task Create_inJobStream_does_not_require_webhookUrl_in_requirement()
+    {
+        // The schema for tick_stream_echo doesn't even ask for webhookUrl — confirm
+        // SubscriptionService accepts the request without one.
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var resp = await svc.CreateAsync(TickStreamReq(ticks: 1, interval: 60));
+        Assert.Equal("inJobStream", resp.PushMode);
+    }
+
+    [Fact]
+    public async Task Create_inJobStream_requires_streamChainId()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var bad = TickStreamReq(ticks: 1, interval: 60, streamChainId: null);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
+        Assert.Contains("streamChainId", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_inJobStream_requires_streamJobId()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var bad = TickStreamReq(ticks: 1, interval: 60, streamJobId: "");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
+        Assert.Contains("streamJobId", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_inJobStream_enforces_4hr_window_cap_not_90day()
+    {
+        // 60s × 300 = 18000s = 5h > MaxStreamWindow(4h) but < MaxFutureWindow(90d)
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickStreamReq(ticks: 300, interval: 60)));
+        Assert.Contains("inJobStream cap", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_unknown_pushMode()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var bad = new CreateSubscriptionRequest(
+            "job-x", "0xbuyer", "tick_echo",
+            new Dictionary<string, object>
+            {
+                ["message"]         = "ping",
+                ["webhookUrl"]      = "https://x/cb",
+                ["intervalSeconds"] = 60,
+                ["ticks"]           = 1
+            },
+            PushMode: "bogus");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
+        Assert.Contains("pushMode", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_tick_echo_with_null_pushMode_defaults_to_webhook()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var resp = await svc.CreateAsync(TickEchoReq(ticks: 1, interval: 60));
+        Assert.Equal("webhook", resp.PushMode);
+        Assert.NotNull(resp.WebhookSecret);
     }
 }

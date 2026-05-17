@@ -13,7 +13,8 @@ public class TickExecutorTests
         await repo.InsertAsync(new Subscription(
             id, $"job-{id}", "0x", "tick_echo", "{}", "https://x/cb", "sec",
             60, 5, 0, DateTime.UtcNow, DateTime.UtcNow.AddHours(1), null,
-            DateTime.UtcNow.AddSeconds(60), "active", 0));
+            DateTime.UtcNow.AddSeconds(60), "active", 0,
+            PushMode: "webhook", StreamChainId: null, StreamJobId: null));
         await te.InsertAsync(id, msg);
     }
 
@@ -49,7 +50,8 @@ public class TickExecutorTests
         var sub = new Subscription(
             "x", "j", "0x", "unknown_offering", "{}", "https://x", "s",
             60, 5, 0, DateTime.UtcNow, DateTime.UtcNow.AddHours(1), null,
-            DateTime.UtcNow.AddSeconds(60), "active", 0);
+            DateTime.UtcNow.AddSeconds(60), "active", 0,
+            PushMode: "webhook", StreamChainId: null, StreamJobId: null);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ComputePayloadAsync(sub, 1));
     }

@@ -23,7 +23,10 @@ public class SubscriptionRepositoryTests
             LastRunAt: null,
             NextRunAt: nextRun,
             Status: status,
-            ConsecutiveFailures: 0
+            ConsecutiveFailures: 0,
+            PushMode: "webhook",
+            StreamChainId: null,
+            StreamJobId: null
         );
 
     [Fact]
