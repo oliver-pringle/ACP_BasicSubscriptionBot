@@ -6,8 +6,8 @@ public record Subscription(
     string BuyerAgent,
     string OfferingName,
     string RequirementJson,
-    string WebhookUrl,
-    string WebhookSecret,
+    string? WebhookUrl,
+    string? WebhookSecret,
     int IntervalSeconds,
     int TicksPurchased,
     int TicksDelivered,
@@ -16,5 +16,8 @@ public record Subscription(
     DateTime? LastRunAt,
     DateTime NextRunAt,
     string Status,
-    int ConsecutiveFailures
+    int ConsecutiveFailures,
+    string PushMode,
+    int? StreamChainId,
+    string? StreamJobId
 );

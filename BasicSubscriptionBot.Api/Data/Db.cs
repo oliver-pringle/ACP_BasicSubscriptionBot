@@ -40,6 +40,10 @@ public class Db
         cmd.CommandText = "PRAGMA journal_mode = WAL;";
         await cmd.ExecuteNonQueryAsync();
 
+        // webhook_url / webhook_secret stay NOT NULL on disk for backwards
+        // compat with existing dev databases — inJobStream rows persist empty
+        // strings instead of NULL, and the repository projects empty → null
+        // on read so callers see Subscription.WebhookUrl as nullable.
         cmd.CommandText = @"
             CREATE TABLE IF NOT EXISTS subscriptions (
                 id                   TEXT PRIMARY KEY,
@@ -57,7 +61,10 @@ public class Db
                 last_run_at          TEXT,
                 next_run_at          TEXT NOT NULL,
                 status               TEXT NOT NULL,
-                consecutive_failures INTEGER NOT NULL DEFAULT 0
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                push_mode            TEXT NOT NULL DEFAULT 'webhook',
+                stream_chain_id      INTEGER,
+                stream_job_id        TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_subs_due ON subscriptions(status, next_run_at);
 
@@ -88,5 +95,30 @@ public class Db
                 received_at TEXT    NOT NULL
             );";
         await cmd.ExecuteNonQueryAsync();
+
+        // Idempotent in-place migrations for databases created before PushMode
+        // landed. PRAGMA table_info is cheap and ALTER TABLE ADD COLUMN with a
+        // default is non-destructive on SQLite.
+        await EnsureColumnAsync(conn, "subscriptions", "push_mode",       "TEXT NOT NULL DEFAULT 'webhook'");
+        await EnsureColumnAsync(conn, "subscriptions", "stream_chain_id", "INTEGER");
+        await EnsureColumnAsync(conn, "subscriptions", "stream_job_id",   "TEXT");
+    }
+
+    private static async Task EnsureColumnAsync(
+        SqliteConnection conn, string table, string column, string definition)
+    {
+        await using (var check = conn.CreateCommand())
+        {
+            check.CommandText = $"PRAGMA table_info({table});";
+            await using var reader = await check.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+        }
+        await using var alter = conn.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+        await alter.ExecuteNonQueryAsync();
     }
 }

@@ -4,15 +4,19 @@ public record CreateSubscriptionRequest(
     string JobId,
     string BuyerAgent,
     string OfferingName,
-    Dictionary<string, object> Requirement
+    Dictionary<string, object> Requirement,
+    string? PushMode = null,
+    int? StreamChainId = null,
+    string? StreamJobId = null
 );
 
 public record CreateSubscriptionResponse(
     string SubscriptionId,
-    string WebhookSecret,
+    string? WebhookSecret,
     int TicksPurchased,
     int IntervalSeconds,
-    DateTime ExpiresAt
+    DateTime ExpiresAt,
+    string PushMode
 );
 
 // Public projection of Subscription that omits WebhookSecret. The full
@@ -25,7 +29,7 @@ public record SubscriptionView(
     string BuyerAgent,
     string OfferingName,
     string RequirementJson,
-    string WebhookUrl,
+    string? WebhookUrl,
     int IntervalSeconds,
     int TicksPurchased,
     int TicksDelivered,
@@ -34,13 +38,17 @@ public record SubscriptionView(
     DateTime? LastRunAt,
     DateTime NextRunAt,
     string Status,
-    int ConsecutiveFailures
+    int ConsecutiveFailures,
+    string PushMode,
+    int? StreamChainId,
+    string? StreamJobId
 )
 {
     public static SubscriptionView From(Subscription s) => new(
         s.Id, s.JobId, s.BuyerAgent, s.OfferingName, s.RequirementJson, s.WebhookUrl,
         s.IntervalSeconds, s.TicksPurchased, s.TicksDelivered, s.CreatedAt, s.ExpiresAt,
-        s.LastRunAt, s.NextRunAt, s.Status, s.ConsecutiveFailures);
+        s.LastRunAt, s.NextRunAt, s.Status, s.ConsecutiveFailures,
+        s.PushMode, s.StreamChainId, s.StreamJobId);
 }
 
 public record EchoRequest(string Message);
