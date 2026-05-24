@@ -9,7 +9,8 @@ public class SubscriptionService
 {
     private readonly SubscriptionRepository _subs;
     private readonly TickEchoRepository _tickEcho;
-    private readonly bool _allowInsecureWebhooks;
+    private readonly bool _allowHttpWebhooks;
+    private readonly bool _disableWebhookDnsValidation;
 
     // Bounds keep the worker pressure and DB rows sane for any clone. Override
     // per-bot only if a specific offering needs different shape.
@@ -35,8 +36,7 @@ public class SubscriptionService
     {
         _subs = subs;
         _tickEcho = tickEcho;
-        _allowInsecureWebhooks = string.Equals(
-            cfg?["ALLOW_INSECURE_WEBHOOKS"], "true", StringComparison.OrdinalIgnoreCase);
+        (_allowHttpWebhooks, _disableWebhookDnsValidation) = WebhookFlagsHelper.Resolve(cfg);
     }
 
     public async Task<CreateSubscriptionResponse> CreateAsync(CreateSubscriptionRequest req)
@@ -84,7 +84,7 @@ public class SubscriptionService
         if (pushMode == "webhook")
         {
             webhookUrl = AsString(req.Requirement, "webhookUrl");
-            var urlCheck = WebhookUrlValidator.Validate(webhookUrl, _allowInsecureWebhooks);
+            var urlCheck = WebhookUrlValidator.Validate(webhookUrl, _allowHttpWebhooks, _disableWebhookDnsValidation);
             if (!urlCheck.Ok)
                 throw new InvalidOperationException(urlCheck.Error!);
             webhookSecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();

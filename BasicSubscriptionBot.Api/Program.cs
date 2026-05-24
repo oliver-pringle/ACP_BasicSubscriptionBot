@@ -44,6 +44,36 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Fail-fast on legacy ALLOW_INSECURE_WEBHOOKS=true outside Development. The
+// flag historically bypassed BOTH the https check AND the DNS+private-IP
+// check — audit finding #3 split it into ALLOW_HTTP_WEBHOOKS +
+// DISABLE_WEBHOOK_DNS_VALIDATION, but the legacy alias is retained for tests.
+// In production, refusing to boot is safer than silently shipping the bypass.
+var insecureWebhooks = string.Equals(
+    builder.Configuration["ALLOW_INSECURE_WEBHOOKS"]
+        ?? Environment.GetEnvironmentVariable("ALLOW_INSECURE_WEBHOOKS"),
+    "true", StringComparison.OrdinalIgnoreCase);
+var disableDnsValidation = string.Equals(
+    builder.Configuration["DISABLE_WEBHOOK_DNS_VALIDATION"]
+        ?? Environment.GetEnvironmentVariable("DISABLE_WEBHOOK_DNS_VALIDATION"),
+    "true", StringComparison.OrdinalIgnoreCase);
+if (!app.Environment.IsDevelopment())
+{
+    if (insecureWebhooks)
+        throw new InvalidOperationException(
+            "ALLOW_INSECURE_WEBHOOKS=true is only permitted in Development (legacy flag, " +
+            "bypasses both https and DNS+private-IP checks). " +
+            $"Current environment: {app.Environment.EnvironmentName}. " +
+            "Use the granular ALLOW_HTTP_WEBHOOKS / DISABLE_WEBHOOK_DNS_VALIDATION flags " +
+            "if you really need one of those behaviours, and never set DISABLE_WEBHOOK_DNS_VALIDATION outside tests.");
+    if (disableDnsValidation)
+        throw new InvalidOperationException(
+            "DISABLE_WEBHOOK_DNS_VALIDATION=true is only permitted in Development. " +
+            $"Current environment: {app.Environment.EnvironmentName}. " +
+            "Without this check, an attacker can register a webhook whose hostname DNS-rebinds " +
+            "to a private/metadata address — exactly the SSRF lane this flag exists to test.");
+}
+
 // X-API-Key middleware. Required in any non-Development environment — a fail-
 // open default plus a bad .env deploy or env-load failure would silently expose
 // every endpoint. In Development the bot is still allowed to start without a

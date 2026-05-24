@@ -9,7 +9,8 @@ public class WebhookDeliveryService
 {
     private readonly HttpClient _http;
     private readonly ILogger<WebhookDeliveryService> _logger;
-    private readonly bool _allowInsecure;
+    private readonly bool _allowHttpWebhooks;
+    private readonly bool _disableWebhookDnsValidation;
     private const int BodyCapBytes = 1_048_576; // 1 MB
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -18,7 +19,7 @@ public class WebhookDeliveryService
         _http = http;
         _logger = logger;
         _http.Timeout = Timeout;
-        _allowInsecure = string.Equals(cfg["ALLOW_INSECURE_WEBHOOKS"], "true", StringComparison.OrdinalIgnoreCase);
+        (_allowHttpWebhooks, _disableWebhookDnsValidation) = WebhookFlagsHelper.Resolve(cfg);
     }
 
     public static string ComputeSignature(string secret, int tick, long timestamp, string body)
@@ -45,7 +46,7 @@ public class WebhookDeliveryService
         // Re-validate at delivery time. The subscribe endpoint validates on
         // insert, but a) older rows may pre-date the check, b) DNS for the
         // host may have rebound to a private IP since insert.
-        var urlCheck = WebhookUrlValidator.Validate(sub.WebhookUrl, _allowInsecure);
+        var urlCheck = WebhookUrlValidator.Validate(sub.WebhookUrl, _allowHttpWebhooks, _disableWebhookDnsValidation);
         if (!urlCheck.Ok)
             return new DeliveryResult(false, $"webhookUrl rejected: {urlCheck.Error}");
 

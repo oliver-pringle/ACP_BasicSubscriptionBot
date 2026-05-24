@@ -5,28 +5,34 @@ namespace BasicSubscriptionBot.Api.Services;
 
 // Server-side validation for buyer-supplied webhook URLs. Defends against SSRF
 // where an attacker registers a subscription pointed at internal services
-// reachable from inside the docker network (loopback, the cloud metadata
-// endpoint, RFC1918 IPs of other containers/host services).
+// reachable from inside the docker network (loopback, cloud metadata endpoint,
+// RFC1918 IPs of other containers/host services).
 //
-// Set ALLOW_INSECURE_WEBHOOKS=true in dev to permit http:// and unresolvable
-// stub hosts (e.g. `buyer.test` in CI). Production must leave it unset (or
-// set to false).
+// Two operator flags split the previous single ALLOW_INSECURE_WEBHOOKS=true
+// switch (audit finding #3 — that single flag bypassed BOTH the https check
+// AND the DNS+private-IP check, which is way more than the name suggested):
 //
-// 2026-05-24 SSRF-hardening pass (portfolio-wide):
-//   - Special-use IPv4 ranges added: multicast 224.0.0.0/4, reserved/future
-//     240.0.0.0/4 (covers broadcast 255.255.255.255), TEST-NET docs
-//     192.0.2/24, 198.51.100/24, 203.0.113/24, benchmark 198.18/15.
-//   - Special-use IPv6 ranges added: unspecified ::, documentation
-//     2001:db8::/32, IPv4-translated 64:ff9b::/96.
-//   - allowInsecure=true no longer skips IP-block checks wholesale; the bypass
-//     now applies ONLY when DNS resolution fails or returns 0 records, so the
-//     test escape hatch for unresolvable stub hosts is preserved while IP
-//     literals + resolved IPs always get the block-list check.
+//   * AllowHttpWebhooks (env: ALLOW_HTTP_WEBHOOKS)
+//       Permits http:// URLs. Useful for local tests against http stub servers.
+//       Production must leave it unset (or false).
+//
+//   * DisableWebhookDnsValidation (env: DISABLE_WEBHOOK_DNS_VALIDATION)
+//       Skips DNS resolution + private-IP blocklist. Useful for unit tests that
+//       use stub hostnames like `buyer.test` that don't resolve. Production
+//       MUST leave it unset — without this check, an attacker can register a
+//       webhook whose hostname later DNS-rebinds to 169.254.169.254 or a
+//       sibling container's RFC1918 address.
+//
+// For backward compatibility the legacy ALLOW_INSECURE_WEBHOOKS=true flag is
+// honoured at Program.cs boot: it sets BOTH new flags. But Program.cs also
+// refuses to boot with the legacy flag in non-Development environments — it
+// was a known foot-gun and is now the explicit fail-fast case.
 public static class WebhookUrlValidator
 {
     public readonly record struct Result(bool Ok, string? Error);
 
-    public static Result Validate(string? url, bool allowInsecure)
+    /// New API — split flags. Production passes (false, false).
+    public static Result Validate(string? url, bool allowHttp, bool skipDnsValidation)
     {
         if (string.IsNullOrWhiteSpace(url))
             return new Result(false, "webhookUrl required");
@@ -35,15 +41,17 @@ public static class WebhookUrlValidator
             return new Result(false, "webhookUrl must be an absolute URI");
 
         if (uri.Scheme != Uri.UriSchemeHttps &&
-            !(allowInsecure && uri.Scheme == Uri.UriSchemeHttp))
+            !(allowHttp && uri.Scheme == Uri.UriSchemeHttp))
             return new Result(false, "webhookUrl must use https://");
 
         if (uri.IsDefaultPort == false && (uri.Port < 1 || uri.Port > 65535))
             return new Result(false, "webhookUrl port out of range");
 
-        // Resolve the host and check every resolved address. A hostname can
-        // round-robin or rebind to an internal address; checking only the
-        // literal would let an attacker DNS-rebind past us.
+        // skipDnsValidation is a tests-only escape hatch. Production never sets
+        // this — that's what closed audit finding #3 (the old single flag
+        // bypassed both checks).
+        if (skipDnsValidation) return new Result(true, null);
+
         IPAddress[] addresses;
         if (IPAddress.TryParse(uri.Host, out var literal))
         {
@@ -57,18 +65,10 @@ public static class WebhookUrlValidator
             }
             catch (SocketException)
             {
-                // Test escape hatch: unresolvable stub hosts (`buyer.test`)
-                // are accepted under ALLOW_INSECURE_WEBHOOKS so CI doesn't
-                // need DNS. IP literals + resolved IPs still hit IsBlocked
-                // below; this bypass is scoped to unresolvable hosts only.
-                if (allowInsecure) return new Result(true, null);
                 return new Result(false, "webhookUrl host did not resolve");
             }
             if (addresses.Length == 0)
-            {
-                if (allowInsecure) return new Result(true, null);
                 return new Result(false, "webhookUrl host did not resolve");
-            }
         }
 
         foreach (var addr in addresses)
@@ -79,6 +79,18 @@ public static class WebhookUrlValidator
 
         return new Result(true, null);
     }
+
+    /// Legacy single-flag overload, kept for any external caller that hasn't
+    /// migrated. Equivalent to passing the same value to both new flags.
+    public static Result Validate(string? url, bool allowInsecure)
+        => Validate(url, allowInsecure, allowInsecure);
+
+    /// Public connect-time variant — re-validates an IP at TCP connect time
+    /// from a SocketsHttpHandler.ConnectCallback, closing the DNS-rebind TOCTOU
+    /// window between validate-time DNS resolution and HttpClient's own
+    /// connect-time resolve.
+    public static bool IsConnectBlocked(IPAddress addr, out string reason)
+        => IsBlocked(addr, out reason);
 
     private static bool IsBlocked(IPAddress addr, out string reason)
     {
