@@ -21,7 +21,7 @@ const MAX_DURATION_SECONDS = MAX_DURATION_MINUTES * 60;
 export const tickStreamEcho: Offering = {
   name: "tick_stream_echo",
   description:
-    "Push a fixed message every N seconds for K ticks via the kept-open ACP job (no buyer webhook needed). Phase-1 test fixture for the inJobStream PushMode — buyer's AcpAgent.on(\"entry\") receives each tick as an AgentMessage(structured). Max 5 ticks / 5 minutes.",
+    "Push a fixed message every N seconds for K ticks via the kept-open ACP job (no buyer webhook needed). Phase-1 test fixture for the inJobStream PushMode  -  buyer's AcpAgent.on(\"entry\") receives each tick as an AgentMessage(structured). Max 5 ticks / 5 minutes.",
   slaMinutes: 10, // hire is instant; the open job runs up to MAX_DURATION_MINUTES
   requirementSchema: {
     type: "object",
@@ -78,7 +78,7 @@ export const tickStreamEcho: Offering = {
     if (!t.valid) return t;
     const totalSec = (req.intervalSeconds as number) * (req.ticks as number);
     if (totalSec > MAX_DURATION_SECONDS)
-      return { valid: false, reason: `intervalSeconds × ticks (${totalSec}s) exceeds ${MAX_DURATION_MINUTES}m fixture cap` };
+      return { valid: false, reason: `intervalSeconds x ticks (${totalSec}s) exceeds ${MAX_DURATION_MINUTES}m fixture cap` };
     return { valid: true };
   },
   subscription: {
@@ -90,8 +90,8 @@ export const tickStreamEcho: Offering = {
     // is intentionally far below that.
     maxDurationDays:     1,
     tiers: [
-      // 5 ticks × $0.01 = $0.05; durationDays must be one of {7,15,30,90}
-      // for the marketplace UI — use the smallest tier even though the
+      // 5 ticks x $0.01 = $0.05; durationDays must be one of {7,15,30,90}
+      // for the marketplace UI  -  use the smallest tier even though the
       // fixture finishes inside 5 minutes.
       { name: "phase1_smoke", priceUsd: 0.05, durationDays: 7 }
     ],

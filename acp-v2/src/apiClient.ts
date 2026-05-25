@@ -15,7 +15,7 @@ export interface CreateSubscriptionInput {
 export interface CreateSubscriptionResponse {
   subscriptionId: string;
   // null when pushMode === "inJobStream" (no buyer-side HMAC verification
-  // — the SDK transport authenticates the seller).
+  //  -  the SDK transport authenticates the seller).
   webhookSecret: string | null;
   ticksPurchased: number;
   intervalSeconds: number;

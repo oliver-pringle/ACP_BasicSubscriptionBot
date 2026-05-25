@@ -27,8 +27,8 @@ for (const [name, off] of Object.entries(OFFERINGS)) {
   if (off.subscription) {
     const basePrice = Math.min(...off.subscription.tiers.map(t => t.priceUsd));
     console.log(`type:        SUBSCRIPTION`);
-    console.log(`Price:        ${basePrice.toFixed(2)} USDC  (base price — marketplace requires min $0.01; cheapest tier)`);
-    console.log(`SLA:          ${off.slaMinutes} min  (hire → subscription receipt; per-tick is governed by interval)`);
+    console.log(`Price:        ${basePrice.toFixed(2)} USDC  (base price  -  marketplace requires min $0.01; cheapest tier)`);
+    console.log(`SLA:          ${off.slaMinutes} min  (hire -> subscription receipt; per-tick is governed by interval)`);
     console.log(`Marketplace tiers (paste into "Add Job - Subscription Tiers" form):`);
     for (const tier of off.subscription.tiers) {
       console.log(`  Tier: ${tier.name} | $${tier.priceUsd} | ${tier.durationDays} days`);

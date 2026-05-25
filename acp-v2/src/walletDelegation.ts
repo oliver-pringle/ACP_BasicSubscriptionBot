@@ -6,7 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 // Origin: lifted from ACP_ChainlinkBot/acp-v2/src/walletDelegation.ts after
 // the 2026-05-11 Base mainnet cutover hit `Expected bigint, got: 0` on the
 // first hire. The same drift will hit any bot whose Privy WaaS rotates the
-// delegation to a non-allowlisted impl — every Privy-WaaS bot must guard
+// delegation to a non-allowlisted impl  -  every Privy-WaaS bot must guard
 // against it on boot. Round 7 PART 5 item B1 lifted this into both
 // boilerplates so future bots inherit the guard.
 //

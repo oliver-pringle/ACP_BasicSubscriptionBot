@@ -192,7 +192,7 @@ async function main() {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  console.log("[seller] running — waiting for jobs");
+  console.log("[seller] running  -  waiting for jobs");
 }
 
 main().catch((err) => { console.error("[seller] fatal:", err); process.exit(1); });

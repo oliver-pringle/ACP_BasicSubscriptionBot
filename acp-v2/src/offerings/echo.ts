@@ -7,7 +7,7 @@ export const echo: Offering = {
   name: "echo",
   description:
     "Echo a message back. One-shot offering. Demonstrates the BasicSubscriptionBot pattern handles vanilla one-shot calls alongside subscription offerings.",
-  slaMinutes: 5, // SQLite write only; sub-second — min SLA
+  slaMinutes: 5, // SQLite write only; sub-second  -  min SLA
   requirementSchema: {
     type: "object",
     properties: {

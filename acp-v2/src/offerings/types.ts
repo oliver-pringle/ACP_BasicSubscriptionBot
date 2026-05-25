@@ -5,12 +5,12 @@ export interface OfferingContext {
   client: ApiClient;
 }
 
-/// Marketplace tier — what app.virtuals.io's "Add Job - Subscription Tiers"
-/// form takes. Each subscription offering MUST declare ≥1 tier; multiple
+/// Marketplace tier  -  what app.virtuals.io's "Add Job - Subscription Tiers"
+/// form takes. Each subscription offering MUST declare >=1 tier; multiple
 /// tiers let buyers pick a duration/commitment (weekly/monthly/quarterly).
 /// Marketplace UI restricts duration to {7, 15, 30, 90} days.
 export interface SubscriptionTier {
-  /// Tier name, ≤20 chars, snake_case (e.g. "monthly", "30d_watch").
+  /// Tier name, <=20 chars, snake_case (e.g. "monthly", "30d_watch").
   name: string;
   /// Flat USD price for the entire tier duration (NOT per-tick).
   priceUsd: number;
@@ -19,7 +19,7 @@ export interface SubscriptionTier {
 }
 
 export interface SubscriptionConfig {
-  // Internal billing fields — used by the bot's worker loop / per-tick HMAC
+  // Internal billing fields  -  used by the bot's worker loop / per-tick HMAC
   // delivery. NOT shown on the marketplace; the marketplace shows `tiers`.
   pricePerTickUsdc: number;
   minIntervalSeconds: number;
@@ -30,11 +30,11 @@ export interface SubscriptionConfig {
   /// Required since 2026-05-10.
   tiers: SubscriptionTier[];
 
-  /// Delivery mode for per-tick payloads. Defaults to "webhook" — buyer
+  /// Delivery mode for per-tick payloads. Defaults to "webhook"  -  buyer
   /// supplies an HTTPS URL in the requirement, bot HMAC-POSTs each tick.
   /// "inJobStream" keeps the ACP job open after the subscription receipt
   /// and pushes per-tick payloads as AgentMessage(contentType="structured")
-  /// over the SSE/WebSocket transport the SDK already holds — buyer needs
+  /// over the SSE/WebSocket transport the SDK already holds  -  buyer needs
   /// no webhook surface. See docs/superpowers/specs/2026-05-17-pushmode-
   /// injobstream-design.md for the SDK semantics + Phase-1 verification
   /// gate. Hard-capped to MaxStreamWindow (4h) on the C# tier until that
@@ -46,9 +46,9 @@ export interface Offering {
   name: string;
   description: string;
   // Required: estimated maximum job duration in minutes (min 5). Buyer-facing
-  // SLA — marketplace surfaces this so buyers know what wall-clock window to
+  // SLA  -  marketplace surfaces this so buyers know what wall-clock window to
   // plan for between hire and deliverable. For subscription offerings this is
-  // hire → subscription receipt (always fast); per-tick latency is governed
+  // hire -> subscription receipt (always fast); per-tick latency is governed
   // by cadence.
   slaMinutes: number;
   requirementSchema: Record<string, unknown>;
@@ -56,7 +56,7 @@ export interface Offering {
   // Goes into the marketplace registration form.
   requirementExample: unknown;
   // Required: deliverable contract (JSON Schema) + one realistic example. Build the
-  // schema from the C# response model — ASP.NET Core's web defaults emit camelCase
+  // schema from the C# response model  -  ASP.NET Core's web defaults emit camelCase
   // keys but DO NOT register JsonStringEnumConverter, so C# enums serialise as ints
   // unless you explicitly .ToString() them. For SUBSCRIPTION offerings, the
   // deliverable shape is the subscription receipt returned at hire time, NOT the

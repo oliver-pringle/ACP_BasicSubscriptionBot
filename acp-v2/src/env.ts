@@ -32,7 +32,7 @@ const DEFAULT_RPC: Record<ChainName, string> = {
 // inJobStream PushMode internal HTTP listener default port. Matches the C#
 // tier's InJobStreamDeliveryService default BaseUrl (http://localhost:6001).
 // Override with BASICSUBSCRIPTIONBOT_STREAM_PUSH_PORT for non-default deploys
-// — must also update Services:StreamPush:BaseUrl on the C# side in lockstep.
+//  -  must also update Services:StreamPush:BaseUrl on the C# side in lockstep.
 const DEFAULT_STREAM_PUSH_PORT = 6001;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {

@@ -10,7 +10,7 @@ const MAX_DURATION_DAYS = 90;
 export const tickEcho: Offering = {
   name: "tick_echo",
   description:
-    "Push a fixed message to your webhook every N seconds for K ticks. Subscription offering — pay upfront for the full tick budget. Demonstrates the BasicSubscriptionBot worker-loop + webhook + HMAC pattern end-to-end.",
+    "Push a fixed message to your webhook every N seconds for K ticks. Subscription offering  -  pay upfront for the full tick budget. Demonstrates the BasicSubscriptionBot worker-loop + webhook + HMAC pattern end-to-end.",
   slaMinutes: 5, // subscription hire is instant; per-tick is governed by intervalSeconds
   requirementSchema: {
     type: "object",
@@ -30,12 +30,12 @@ export const tickEcho: Offering = {
   },
   // Subscription deliverable = the receipt submitted on the ACP job at hire time.
   // Per-tick webhook payloads (and their HMAC headers) are pushed directly to the
-  // buyer's webhookUrl — they don't traverse ACP and aren't part of this schema.
+  // buyer's webhookUrl  -  they don't traverse ACP and aren't part of this schema.
   deliverableSchema: {
     type: "object",
     properties: {
       subscriptionId:  { type: "string",  description: "UUID identifying this subscription." },
-      webhookSecret:   { type: "string",  description: "32-byte hex HMAC-SHA256 secret. Returned ONCE — buyer must persist." },
+      webhookSecret:   { type: "string",  description: "32-byte hex HMAC-SHA256 secret. Returned ONCE  -  buyer must persist." },
       ticksPurchased:  { type: "integer", description: "Total ticks the buyer paid for." },
       intervalSeconds: { type: "integer", description: "Seconds between ticks." },
       expiresAt:       { type: "string",  description: "ISO-8601 UTC. Subscription auto-completes after this." },
@@ -62,7 +62,7 @@ export const tickEcho: Offering = {
     if (!t.valid) return t;
     const totalSec = (req.intervalSeconds as number) * (req.ticks as number);
     const cap = MAX_DURATION_DAYS * 86400;
-    if (totalSec > cap) return { valid: false, reason: `intervalSeconds × ticks (${totalSec}s) exceeds ${MAX_DURATION_DAYS}d cap (${cap}s)` };
+    if (totalSec > cap) return { valid: false, reason: `intervalSeconds x ticks (${totalSec}s) exceeds ${MAX_DURATION_DAYS}d cap (${cap}s)` };
     return { valid: true };
   },
   subscription: {
@@ -71,7 +71,7 @@ export const tickEcho: Offering = {
     maxTicks: MAX_TICKS,
     maxDurationDays: MAX_DURATION_DAYS,
     tiers: [
-      { name: "weekly_hourly", priceUsd: 1.68, durationDays: 7 }  // 168 ticks × $0.01
+      { name: "weekly_hourly", priceUsd: 1.68, durationDays: 7 }  // 168 ticks x $0.01
     ]
   }
 };

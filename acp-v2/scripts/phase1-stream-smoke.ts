@@ -6,7 +6,7 @@
  * reports PASS/WARN/FAIL on the 8-item checklist from
  * docs/superpowers/specs/2026-05-17-pushmode-injobstream-design.md §10.
  *
- * Standalone — uses a buyer wallet's creds (SMOKE_BUYER_*) entirely
+ * Standalone  -  uses a buyer wallet's creds (SMOKE_BUYER_*) entirely
  * separate from the seller's ACP_* env vars. Run alongside (not inside)
  * the running BSB sidecar.
  *
@@ -114,7 +114,7 @@ async function main(): Promise<number> {
   console.log(`Buyer wallet:    ${env.buyerWalletAddress}`);
   console.log(`Seller:          ${env.sellerAddress}`);
   console.log(`Chain:           ${env.chain} (chainId=${chain.id})`);
-  console.log(`Cadence:         ${env.intervalSeconds}s × ${env.ticks} ticks`);
+  console.log(`Cadence:         ${env.intervalSeconds}s x ${env.ticks} ticks`);
   console.log(`Reconnect after: tick ${env.reconnectAfterTick || "(never)"}`);
   console.log(`Hire-window:     ${env.timeoutMs / 1000}s`);
   console.log("");
@@ -326,7 +326,7 @@ async function main(): Promise<number> {
       : `last system event: ${lastSystemEvent ?? "(none)"}`,
   });
 
-  // Q1 — Job stayed in TRANSACTION through every tick (no premature completion).
+  // Q1  -  Job stayed in TRANSACTION through every tick (no premature completion).
   const completedBeforeFinalTick = finalCompletedAt !== null && tickCount < env.ticks;
   items.push({
     id: "Q1",
@@ -335,11 +335,11 @@ async function main(): Promise<number> {
     note: completedBeforeFinalTick
       ? `job.completed fired after only ${tickCount} ticks (expected ${env.ticks})`
       : (finalCompletedAt !== null
-        ? `${tickCount} ticks delivered before close — V2 indexer tolerated the long-open job`
+        ? `${tickCount} ticks delivered before close  -  V2 indexer tolerated the long-open job`
         : "no job.completed observed; rerun with longer SMOKE_TIMEOUT_MS or check seller logs"),
   });
 
-  // Q2 — slaMinutes upper bound. Smoke can't probe the marketplace registration form
+  // Q2  -  slaMinutes upper bound. Smoke can't probe the marketplace registration form
   // directly; just confirm the SDK accepted the offering as registered.
   items.push({
     id: "Q2",
@@ -348,7 +348,7 @@ async function main(): Promise<number> {
     note: `Confirm at registration time that app.virtuals.io accepted slaMinutes=${offering.slaMinutes} without error`,
   });
 
-  // Q3 — Reconnect / dedup. Only runs if --reconnect-after-tick set.
+  // Q3  -  Reconnect / dedup. Only runs if --reconnect-after-tick set.
   if (env.reconnectAfterTick > 0) {
     items.push({
       id: "Q3",
@@ -367,7 +367,7 @@ async function main(): Promise<number> {
     });
   }
 
-  // (4) Cadence sanity — average interval between ticks within ±10% of intervalSeconds.
+  // (4) Cadence sanity  -  average interval between ticks within +/-10% of intervalSeconds.
   const tickEntries = captured
     .filter((c) => c.kind === "message" && c.detail === "structured")
     .slice(1); // drop receipt
@@ -381,7 +381,7 @@ async function main(): Promise<number> {
     const driftPct = Math.abs(avgMs - expectedMs) / expectedMs * 100;
     items.push({
       id: "4",
-      label: `Cadence within ±20% of ${env.intervalSeconds}s`,
+      label: `Cadence within +/-20% of ${env.intervalSeconds}s`,
       result: driftPct <= 20 ? "PASS" : "WARN",
       note: `avg interval ${(avgMs / 1000).toFixed(1)}s (drift ${driftPct.toFixed(1)}%)`,
     });
@@ -390,7 +390,7 @@ async function main(): Promise<number> {
       id: "4",
       label: "Cadence sanity",
       result: "WARN",
-      note: "Need ≥2 ticks to compute cadence; check tick count first",
+      note: "Need >=2 ticks to compute cadence; check tick count first",
     });
   }
 
@@ -405,7 +405,7 @@ async function main(): Promise<number> {
     note: parseFailures === 0 ? "all payloads parsed" : `${parseFailures}/${tickEntries.length} payloads failed to parse`,
   });
 
-  // (6) Payload shape — every tick carries subscriptionId, tick, message.
+  // (6) Payload shape  -  every tick carries subscriptionId, tick, message.
   let shapeOk = true;
   let shapeReason = "";
   for (const t of tickEntries) {
@@ -425,7 +425,7 @@ async function main(): Promise<number> {
     note: shapeOk ? "shape OK on every tick" : shapeReason,
   });
 
-  // (7) No regression — webhook offerings unaffected. Out of scope of this script.
+  // (7) No regression  -  webhook offerings unaffected. Out of scope of this script.
   items.push({
     id: "7",
     label: "Webhook-mode regression (covered by tick_echo smoke separately)",
@@ -433,7 +433,7 @@ async function main(): Promise<number> {
     note: "Run the existing tick_echo HMAC webhook smoke after this passes",
   });
 
-  // (8) Concurrent stress — out of scope for v1 of the harness.
+  // (8) Concurrent stress  -  out of scope for v1 of the harness.
   items.push({
     id: "8",
     label: "Concurrent stress (10 simultaneous hires)",
@@ -451,7 +451,7 @@ async function main(): Promise<number> {
               : it.result === "FAIL" ? "FAIL"
               : "N/A ";
     console.log(`[${tag}] ${it.id.padEnd(3, " ")} ${it.label}`);
-    if (it.note) console.log(`        → ${it.note}`);
+    if (it.note) console.log(`        -> ${it.note}`);
   }
   console.log("");
 

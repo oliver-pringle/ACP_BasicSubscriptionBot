@@ -6,19 +6,19 @@ import type { AcpAgent } from "@virtuals-protocol/acp-node-v2";
 // (InJobStreamDeliveryService) POSTs each tick payload here, and this server
 // translates the call into an SDK message on the kept-open ACP job:
 //
-//   POST /v1/internal/push-tick     → agent.sendMessage(chainId, jobId, payloadJson, "structured")
-//   POST /v1/internal/submit-final  → session.submit(finalPayloadJson)  (closes job)
-//   GET  /health                    → liveness
+//   POST /v1/internal/push-tick     -> agent.sendMessage(chainId, jobId, payloadJson, "structured")
+//   POST /v1/internal/submit-final  -> session.submit(finalPayloadJson)  (closes job)
+//   GET  /health                    -> liveness
 //
 // Auth: X-API-Key required on the two POST endpoints; matches the bot's
 // BASICSUBSCRIPTIONBOT_API_KEY (same secret as the C# tier middleware).
 //
-// Bind only on the docker-internal bridge — Caddy MUST NOT forward this port.
+// Bind only on the docker-internal bridge  -  Caddy MUST NOT forward this port.
 // Default port 6001 matches InJobStreamDeliveryService's default BaseUrl.
 //
 // We deliberately use the SDK's REST send path (agent.sendMessage, awaitable +
 // durable) rather than the transport-push agent.sendJobMessage (fire-and-
-// forget). Trades ~250ms latency for delivery confidence — the right choice
+// forget). Trades ~250ms latency for delivery confidence  -  the right choice
 // for the Phase-1 60s-cadence smoke. Sub-second streams in Phase 2+ can
 // switch to sendJobMessage per-offering.
 
@@ -79,7 +79,7 @@ async function handle(
 
   if (method !== "POST") { writeJson(res, 405, { error: "method not allowed" }); return; }
 
-  // Auth — same secret as the C# tier; constant-time compare.
+  // Auth  -  same secret as the C# tier; constant-time compare.
   if (apiKey) {
     const provided = req.headers["x-api-key"];
     const providedStr = Array.isArray(provided) ? provided[0] : provided;
@@ -102,7 +102,7 @@ async function handle(
     } catch (sdkErr) {
       const message = sdkErr instanceof Error ? sdkErr.message : String(sdkErr);
       console.warn(`[streamPush] sendMessage failed for sub=${body.subscriptionId} job=${body.jobId}: ${message}`);
-      // 502 = upstream (transport / SDK) failure — RetryWorker should retry.
+      // 502 = upstream (transport / SDK) failure  -  RetryWorker should retry.
       writeJson(res, 502, { error: "sendMessage failed", detail: message });
     }
     return;
