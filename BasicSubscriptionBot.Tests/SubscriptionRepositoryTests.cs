@@ -1,5 +1,8 @@
 using BasicSubscriptionBot.Api.Data;
 using BasicSubscriptionBot.Api.Models;
+using BasicSubscriptionBot.Api.Services;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 namespace BasicSubscriptionBot.Tests;
@@ -128,5 +131,96 @@ public class SubscriptionRepositoryTests
 
         var f = await repo.GetByIdAsync("sub-5");
         Assert.Equal(0, f!.ConsecutiveFailures);
+    }
+
+    // ---------------- F3 webhook secret encryption at rest ----------------
+
+    private static WebhookSecretCipher CipherWithKey()
+    {
+        var key = Convert.ToBase64String(new byte[32]
+        {
+            0x9b,0x71,0x4e,0x33,0xfa,0x21,0x18,0x4d,
+            0x7e,0xca,0x60,0x05,0x29,0xab,0x9d,0x10,
+            0x6c,0x88,0x4d,0x9f,0xb0,0x4c,0x33,0x07,
+            0x12,0xff,0xa0,0x6e,0x55,0x1c,0xea,0x42
+        });
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["WebhookSecretEncryptionKey"] = key })
+            .Build();
+        return new WebhookSecretCipher(cfg);
+    }
+
+    [Fact]
+    public async Task Insert_with_cipher_encrypts_webhook_secret_on_disk_and_decrypts_on_read()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var cipher = CipherWithKey();
+        var repo = new SubscriptionRepository(t.Db, cipher);
+
+        await repo.InsertAsync(Sample("sub-enc", DateTime.UtcNow.AddSeconds(60)));
+
+        // Disk shape: row contains the v1: envelope, NOT the plaintext.
+        await using (var conn = t.Db.OpenConnection())
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT webhook_secret FROM subscriptions WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", "sub-enc");
+            var stored = (string?)await cmd.ExecuteScalarAsync();
+            Assert.NotNull(stored);
+            Assert.StartsWith("v1:", stored);
+            Assert.DoesNotContain("deadbeef", stored, StringComparison.Ordinal);
+        }
+
+        // Read shape: repo decrypts transparently — caller sees the original
+        // plaintext "deadbeef" from the Sample() fixture.
+        var fetched = await repo.GetByIdAsync("sub-enc");
+        Assert.Equal("deadbeef", fetched!.WebhookSecret);
+    }
+
+    [Fact]
+    public async Task Read_passes_through_legacy_plaintext_row_when_cipher_enabled()
+    {
+        // Lazy-migration contract: a row inserted without the cipher (legacy
+        // plaintext on disk) must be readable verbatim once the cipher is
+        // enabled, until a write re-encrypts it.
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var noCipherRepo = new SubscriptionRepository(t.Db);
+        await noCipherRepo.InsertAsync(Sample("sub-legacy", DateTime.UtcNow.AddSeconds(60)));
+
+        // Verify the row is on disk as plaintext.
+        await using (var conn = t.Db.OpenConnection())
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT webhook_secret FROM subscriptions WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", "sub-legacy");
+            var stored = (string?)await cmd.ExecuteScalarAsync();
+            Assert.Equal("deadbeef", stored);
+        }
+
+        // Read through the cipher repo: legacy plaintext passes through.
+        var cipherRepo = new SubscriptionRepository(t.Db, CipherWithKey());
+        var fetched = await cipherRepo.GetByIdAsync("sub-legacy");
+        Assert.Equal("deadbeef", fetched!.WebhookSecret);
+    }
+
+    [Fact]
+    public async Task Insert_without_cipher_writes_plaintext_for_dev_compat()
+    {
+        // The no-arg legacy constructor (used by tests / dev clones) writes
+        // plaintext. Tests covered everywhere else; this just locks the
+        // contract so a refactor that flips the default behaviour gets caught.
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var repo = new SubscriptionRepository(t.Db);
+        await repo.InsertAsync(Sample("sub-plain", DateTime.UtcNow.AddSeconds(60)));
+
+        await using var conn = t.Db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT webhook_secret FROM subscriptions WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", "sub-plain");
+        var stored = (string?)await cmd.ExecuteScalarAsync();
+        Assert.Equal("deadbeef", stored);
     }
 }

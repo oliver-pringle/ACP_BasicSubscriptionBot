@@ -1,4 +1,5 @@
 using BasicSubscriptionBot.Api.Models;
+using BasicSubscriptionBot.Api.Services;
 using Microsoft.Data.Sqlite;
 
 namespace BasicSubscriptionBot.Api.Data;
@@ -7,7 +8,26 @@ public class SubscriptionRepository
 {
     private const int SuspendThreshold = 3;
     private readonly Db _db;
-    public SubscriptionRepository(Db db) => _db = db;
+    private readonly WebhookSecretCipher _cipher;
+
+    // The cipher is opt-in via WEBHOOK_SECRET_ENCRYPTION_KEY. When the key is
+    // unset, Protect/Unprotect are no-ops and webhook_secret stays plaintext.
+    // Program.cs fails fast at boot in non-Development unless an operator has
+    // explicitly opted into plaintext via BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true.
+    // Lazy migration: old plaintext rows decrypt as-is via the "v1:" prefix
+    // sniff in Unprotect — they only become ciphertext on the next write.
+    public SubscriptionRepository(Db db, WebhookSecretCipher cipher)
+    {
+        _db = db;
+        _cipher = cipher;
+    }
+
+    // Backward-compatible overload for any existing test that constructs the
+    // repository directly without a cipher. Tests get the no-key (no-op) cipher,
+    // which matches the pre-cipher behaviour bit-for-bit.
+    public SubscriptionRepository(Db db)
+        : this(db, new WebhookSecretCipher(new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()))
+    { }
 
     public async Task InsertAsync(Subscription s)
     {
@@ -33,7 +53,11 @@ public class SubscriptionRepository
         // constraint holds; SubscriptionRepository.Read projects empty → null
         // so callers see Subscription.WebhookUrl as nullable.
         cmd.Parameters.AddWithValue("$url", s.WebhookUrl ?? string.Empty);
-        cmd.Parameters.AddWithValue("$sec", s.WebhookSecret ?? string.Empty);
+        // Wrap webhook_secret through the cipher BEFORE persist. No-op when
+        // WEBHOOK_SECRET_ENCRYPTION_KEY is unset; otherwise produces the
+        // "v1:iv.tag.ct" envelope on disk. inJobStream rows hold "" which
+        // Protect short-circuits to "" — the column stays NOT NULL on disk.
+        cmd.Parameters.AddWithValue("$sec", _cipher.Protect(s.WebhookSecret ?? string.Empty));
         cmd.Parameters.AddWithValue("$iv", s.IntervalSeconds);
         cmd.Parameters.AddWithValue("$tp", s.TicksPurchased);
         cmd.Parameters.AddWithValue("$td", s.TicksDelivered);
@@ -56,7 +80,7 @@ public class SubscriptionRepository
         cmd.CommandText = "SELECT * FROM subscriptions WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync();
-        return await reader.ReadAsync() ? Read(reader) : null;
+        return await reader.ReadAsync() ? ReadRow(reader) : null;
     }
 
     public async Task<List<Subscription>> GetDueAsync(DateTime now, int limit)
@@ -71,7 +95,7 @@ public class SubscriptionRepository
         cmd.Parameters.AddWithValue("$now", now.ToString("O"));
         cmd.Parameters.AddWithValue("$limit", limit);
         await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync()) rows.Add(Read(reader));
+        while (await reader.ReadAsync()) rows.Add(ReadRow(reader));
         return rows;
     }
 
@@ -126,10 +150,16 @@ public class SubscriptionRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private static Subscription Read(SqliteDataReader r)
+    private Subscription ReadRow(SqliteDataReader r)
     {
         var url = r.GetString(r.GetOrdinal("webhook_url"));
-        var sec = r.GetString(r.GetOrdinal("webhook_secret"));
+        var rawSec = r.GetString(r.GetOrdinal("webhook_secret"));
+        // Unwrap through the cipher. Plaintext rows (no "v1:" prefix) pass
+        // through unchanged — lazy migration: an old row only gets re-encrypted
+        // when its parent subscription is re-inserted (which the boilerplate
+        // never does post-create; downstream clones that ALTER rows must
+        // round-trip the secret through Protect themselves).
+        var sec = _cipher.Unprotect(rawSec);
         return new Subscription(
             Id: r.GetString(r.GetOrdinal("id")),
             JobId: r.GetString(r.GetOrdinal("job_id")),

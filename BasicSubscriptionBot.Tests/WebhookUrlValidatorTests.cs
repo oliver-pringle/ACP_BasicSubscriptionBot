@@ -41,6 +41,10 @@ public class WebhookUrlValidatorTests
     [InlineData("https://198.51.100.1/cb",       "docs")]
     [InlineData("https://203.0.113.1/cb",        "docs")]
     [InlineData("https://198.18.0.1/cb",         "benchmark")]
+    // F7 additions:
+    [InlineData("https://192.0.0.1/cb",          "iana")]                  // 192.0.0.0/24 IETF protocol assignments
+    [InlineData("https://192.0.0.250/cb",        "iana")]                  // same range, upper end
+    [InlineData("https://192.88.99.1/cb",        "6to4 anycast")]          // 6to4 anycast relay (deprecated RFC 7526)
     public void Rejects_blocked_ipv4_literals(string url, string reasonContains)
     {
         var r = WebhookUrlValidator.Validate(url, ProdFlags_AllowHttp, ProdFlags_SkipDns);
@@ -55,6 +59,10 @@ public class WebhookUrlValidatorTests
     [InlineData("https://[ff02::1]/cb",                   "multicast")]
     [InlineData("https://[::ffff:127.0.0.1]/cb",          "loopback")]
     [InlineData("https://[2001:db8::1]/cb",               "documentation")]
+    // F7 additions:
+    [InlineData("https://[2002::1]/cb",                   "6to4")]         // 6to4 IPv6 prefix
+    [InlineData("https://[2002:c000:0204::]/cb",          "6to4")]         // 6to4 wrapping a public IPv4
+    [InlineData("https://[2001::1]/cb",                   "teredo")]       // Teredo prefix
     public void Rejects_blocked_ipv6_literals(string url, string reasonContains)
     {
         var r = WebhookUrlValidator.Validate(url, ProdFlags_AllowHttp, ProdFlags_SkipDns);

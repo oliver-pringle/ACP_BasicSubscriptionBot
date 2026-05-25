@@ -309,4 +309,104 @@ public class SubscriptionServiceTests
         Assert.Equal("webhook", resp.PushMode);
         Assert.NotNull(resp.WebhookSecret);
     }
+
+    // ---------------- F9 field length caps ----------------
+
+    [Fact]
+    public async Task Create_rejects_overlong_jobId()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var req = new CreateSubscriptionRequest(
+            JobId: new string('j', SubscriptionService.MaxJobIdLength + 1),
+            BuyerAgent: "0xbuyer",
+            OfferingName: "tick_echo",
+            Requirement: new Dictionary<string, object>
+            {
+                ["message"]         = "ping",
+                ["webhookUrl"]      = "https://buyer.test/cb",
+                ["intervalSeconds"] = 60,
+                ["ticks"]           = 1
+            });
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(req));
+        Assert.Contains("jobId", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_overlong_buyerAgent()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var req = new CreateSubscriptionRequest(
+            JobId: "job-x",
+            BuyerAgent: new string('b', SubscriptionService.MaxBuyerAgentLength + 1),
+            OfferingName: "tick_echo",
+            Requirement: new Dictionary<string, object>
+            {
+                ["message"]         = "ping",
+                ["webhookUrl"]      = "https://buyer.test/cb",
+                ["intervalSeconds"] = 60,
+                ["ticks"]           = 1
+            });
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(req));
+        Assert.Contains("buyerAgent", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_overlong_offeringName()
+    {
+        // Caught BEFORE the known-offering whitelist check so the error
+        // surfaces as the cap violation, not "unknown offering".
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var req = new CreateSubscriptionRequest(
+            JobId: "job-x",
+            BuyerAgent: "0xbuyer",
+            OfferingName: new string('o', SubscriptionService.MaxOfferingNameLength + 1),
+            Requirement: new Dictionary<string, object>
+            {
+                ["message"]         = "ping",
+                ["webhookUrl"]      = "https://buyer.test/cb",
+                ["intervalSeconds"] = 60,
+                ["ticks"]           = 1
+            });
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(req));
+        Assert.Contains("offeringName", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_overlong_streamJobId()
+    {
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var bad = TickStreamReq(
+            ticks: 1, interval: 60,
+            streamChainId: 8453,
+            streamJobId: new string('s', SubscriptionService.MaxStreamJobIdLength + 1));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.CreateAsync(bad));
+        Assert.Contains("streamJobId", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_rejects_overlong_webhookUrl()
+    {
+        // The cap (2048) is well below Kestrel's body limit so build a URL
+        // just over the field cap.
+        var longUrl = "https://buyer.example/" + new string('a', SubscriptionService.MaxWebhookUrlLength);
+        await using var t = TestDb.New();
+        await t.Db.InitializeSchemaAsync();
+        var svc = NewSvc(t);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => svc.CreateAsync(TickEchoReq(ticks: 1, interval: 60, webhook: longUrl)));
+        Assert.Contains("webhookUrl", ex.Message);
+    }
 }

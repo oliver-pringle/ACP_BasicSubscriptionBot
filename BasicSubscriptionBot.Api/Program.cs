@@ -6,6 +6,7 @@ using BasicSubscriptionBot.Api.Middleware;
 using BasicSubscriptionBot.Api.Models;
 using BasicSubscriptionBot.Api.Services;
 using BasicSubscriptionBot.Api.Workers;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Data
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<EchoRepository>();
+builder.Services.AddSingleton<WebhookSecretCipher>();   // AES-GCM at rest for webhook_secret (audit F3)
 builder.Services.AddSingleton<SubscriptionRepository>();
 builder.Services.AddSingleton<SubscriptionRunRepository>();
 builder.Services.AddSingleton<TickEchoRepository>();
@@ -49,6 +51,38 @@ const long MaxRequestBodyBytes = 256L * 1024L;
 builder.Services.Configure<KestrelServerOptions>(o =>
 {
     o.Limits.MaxRequestBodySize = MaxRequestBodyBytes;
+});
+
+// Trust X-Forwarded-For / X-Forwarded-Proto ONLY from configured proxy
+// networks. Default 172.16.0.0/12 (docker bridge) + loopback v4/v6. Audit F5:
+// the rate limiter keyed by ctx.Connection.RemoteIpAddress was previously
+// pinned to the Caddy IP whenever the bot ran behind a reverse proxy, so
+// every external caller shared one bucket. UseForwardedHeaders runs BEFORE
+// the rate-limit middleware below so RemoteIpAddress reflects the real
+// client when (and only when) the proxy IP is in the trusted set.
+//
+// Operators tighten on the droplet by setting TRUSTED_PROXY_NETWORKS to the
+// exact Caddy bridge CIDR (e.g. 172.23.0.0/24). KnownIPNetworks.Clear before
+// adding is critical — the default ASP.NET trust list is empty but defensive
+// clones may inherit non-empty defaults.
+builder.Services.Configure<ForwardedHeadersOptions>(o =>
+{
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    o.ForwardLimit = 1;
+    o.KnownIPNetworks.Clear();
+    o.KnownProxies.Clear();
+    var raw = builder.Configuration["TRUSTED_PROXY_NETWORKS"]
+              ?? Environment.GetEnvironmentVariable("TRUSTED_PROXY_NETWORKS")
+              ?? "172.16.0.0/12,127.0.0.0/8,::1/128";
+    foreach (var cidr in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        try { o.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(cidr)); }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"TRUSTED_PROXY_NETWORKS entry '{cidr}' is not a valid CIDR.", ex);
+        }
+    }
 });
 
 var app = builder.Build();
@@ -89,7 +123,34 @@ if (!app.Environment.IsDevelopment())
             $"Current environment: {app.Environment.EnvironmentName}. " +
             "Without this check, an attacker can register a webhook whose hostname DNS-rebinds " +
             "to a private/metadata address — exactly the SSRF lane this flag exists to test.");
+
+    // 2026-05-25 hardening (audit F3): require WEBHOOK_SECRET_ENCRYPTION_KEY in
+    // non-Development so webhook HMAC secrets aren't sitting plaintext in
+    // SQLite. A leaked DB ⇒ every buyer's webhook can be forged by replaying
+    // signed tick payloads from the seller's side. Opt-out (for transitional
+    // deploys only) via BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true.
+    var webhookCipher = app.Services.GetRequiredService<WebhookSecretCipher>();
+    var allowPlaintextSecrets = string.Equals(
+        builder.Configuration["BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS"]
+            ?? Environment.GetEnvironmentVariable("BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS"),
+        "true", StringComparison.OrdinalIgnoreCase);
+    if (!webhookCipher.IsEncryptionEnabled && !allowPlaintextSecrets)
+        throw new InvalidOperationException(
+            "WEBHOOK_SECRET_ENCRYPTION_KEY is required in non-Development environments. " +
+            $"Current environment: {app.Environment.EnvironmentName}. Generate a 32-byte " +
+            "random base64 key (`openssl rand -base64 32`) and set the env var, or set " +
+            "BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true for a transitional deploy.");
+    if (!webhookCipher.IsEncryptionEnabled && allowPlaintextSecrets)
+        app.Logger.LogWarning(
+            "BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true — webhook_secret column persists plaintext. " +
+            "Treat the SQLite file + every backup as bearer credentials for forging buyer webhooks.");
 }
+
+// 2026-05-25 hardening (audit F5): trust X-Forwarded-For BEFORE the rate
+// limiter so per-IP buckets attribute the real client when (and only when)
+// the proxy IP is in TRUSTED_PROXY_NETWORKS. ForwardedHeadersOptions is
+// configured above so this is a no-op when the bot runs without a proxy.
+app.UseForwardedHeaders();
 
 // Per-IP + per-X-API-Key sliding-window rate limit on heavy / write endpoints
 // (audit F9). Placed BEFORE auth so unauthenticated floods are also throttled.
@@ -119,10 +180,23 @@ app.Use(async (ctx, next) =>
 
 // X-API-Key middleware. Required in any non-Development environment — a fail-
 // open default plus a bad .env deploy or env-load failure would silently expose
-// every endpoint. In Development the bot is still allowed to start without a
-// key, with a loud warning, so local clones don't need configuration to boot.
+// every endpoint. In Development the key is also required by default, unless
+// the explicit escape hatch BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV=true
+// is set — closes audit F1 ("auth can be silently disabled by env-load failure").
+//
+// DEFERRED (KnownBugs P24): the boilerplate ships a single shared X-API-Key
+// gating create-subscription, write-echo, and read endpoints. The audit's
+// High #1 recommends a capability split (READ/WRITE/GAS/OPS) so a leaked key
+// has bounded blast radius. ChainlinkBot already pioneered X-Ops-Key for
+// /v1/internal/wallet-hijack as precedent. Clones that retrofit the split
+// should add per-capability keys here, NOT add new auth lanes to bypass this
+// middleware. See security-audit/SecurityBot/KnownBugs.md#p24.
 var apiKey = builder.Configuration["ApiKey"]
     ?? Environment.GetEnvironmentVariable("BASICSUBSCRIPTIONBOT_API_KEY");
+var allowUnauthenticatedDev = string.Equals(
+    builder.Configuration["BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV"]
+        ?? Environment.GetEnvironmentVariable("BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV"),
+    "true", StringComparison.OrdinalIgnoreCase);
 if (string.IsNullOrEmpty(apiKey))
 {
     if (!app.Environment.IsDevelopment())
@@ -132,9 +206,16 @@ if (string.IsNullOrEmpty(apiKey))
             $"Current environment: {app.Environment.EnvironmentName}. Set the env var " +
             "(or `ApiKey` in configuration) to a high-entropy random string.");
     }
+    if (!allowUnauthenticatedDev)
+    {
+        throw new InvalidOperationException(
+            "BASICSUBSCRIPTIONBOT_API_KEY is required even in Development. " +
+            "Set the env var (or `ApiKey`) to any string for local dev, or set " +
+            "BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV=true to explicitly opt into unauth mode.");
+    }
     app.Logger.LogWarning(
-        "BASICSUBSCRIPTIONBOT_API_KEY not set — Development mode only. " +
-        "Endpoints accept all callers. Set the env var before any non-local deployment.");
+        "BASICSUBSCRIPTIONBOT_API_KEY not set + BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV=true — Development unauth mode. " +
+        "All non-/health, non-/v1/resources endpoints accept all callers.");
 }
 else
 {

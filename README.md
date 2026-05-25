@@ -70,6 +70,23 @@ For local subscription testing without HTTPS:
 $env:ALLOW_INSECURE_WEBHOOKS = "true"
 ```
 
+For local boots without an API key (the API key is required even in
+Development by default after audit F1 2026-05-25, so a `dotnet run` against
+an unconfigured `.env` boots clean only with the explicit opt-in):
+```powershell
+$env:BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_DEV = "true"
+# AND for the sidecar's streamPush server:
+$env:BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH = "true"
+```
+
+For local boots without the AES-GCM webhook-secret cipher (the cipher is
+required in non-Development; Development is unconstrained by default but
+clones whose `ASPNETCORE_ENVIRONMENT` is anything other than `Development`
+locally must opt in):
+```powershell
+$env:BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS = "true"
+```
+
 ## Security defaults (do not deviate without explicit reason)
 
 - **`BASICSUBSCRIPTIONBOT_API_KEY` is required in any non-Development environment.** The boot will throw `InvalidOperationException` if `ASPNETCORE_ENVIRONMENT != "Development"` and the env var is unset, so a misconfigured droplet deploy can't silently start in fail-open mode. In Development the bot still boots without it (with a loud warning) so local clones work out-of-the-box.
@@ -151,16 +168,49 @@ Every tick the bot delivers carries four headers:
 | `X-Subscription-Id` | Subscription identity (same value for every tick on this subscription) |
 | `X-Subscription-Tick` | Tick number — monotonic per subscription starting at 1 |
 | `X-Subscription-Timestamp` | Unix seconds at the moment the signature was computed |
-| `X-Subscription-Signature` | `sha256=` + HMAC-SHA256(`webhookSecret`, `tick + "." + timestamp + "." + body`) |
+| `X-Subscription-Signature` | `sha256=` + HMAC-SHA256(`webhookSecret`, `subscriptionId + "." + tick + "." + timestamp + "." + body`) |
+
+> Audit F4 (2026-05-25): the canonical now binds `subscriptionId` so a captured
+> tuple from subscription A cannot be replayed as a fake delivery to
+> subscription B. The pre-F4 canonical was `tick.timestamp.body` (no subId);
+> clones that pinned the legacy signature must update receiver code before
+> upgrading. `ComputeSignature(secret, tick, timestamp, body)` is retained as
+> an `[Obsolete]` overload for transitional compat.
 
 Buyers MUST do ALL of the following to be safe against replay:
 
-1. **Verify the HMAC.** Recompute and constant-time-compare. Reject mismatches.
+1. **Verify the HMAC.** Recompute the canonical as `${X-Subscription-Id}.${X-Subscription-Tick}.${X-Subscription-Timestamp}.${rawBody}` and constant-time-compare. Reject mismatches.
 2. **Verify timestamp freshness** — reject if `abs(now_unix_sec - X-Subscription-Timestamp) > 300` (±5 minutes). The bot's `WebhookDeliveryService` sets the timestamp at signature time; legitimate ticks always arrive inside a small window. Without this check, an attacker who captures a single delivered request can replay it indefinitely (the HMAC alone has no expiry).
 3. **Deduplicate by `(subscriptionId, tick)`** — accept the first delivery per tuple and respond 200; respond 200 (no-op) to all subsequent identical deliveries. The bot retries on transient failures, so a buyer hard-throwing on duplicate ticks would cause spurious retry storms.
 4. (Optional but recommended) **Enforce monotonic ticks** — reject any tick < `max_seen_tick - 1`. Combined with #3 this catches both replay and re-ordering.
 
-Audit F11 (2026-05-25): the bot sends the timestamp; buyer-side enforcement is the buyer's responsibility. If your buyer integration is in TypeScript and you want a reference verifier, lift the pattern from `ACP_RevokeBot/docs/runbook.md` (first portfolio buyer-side consumer of this contract).
+Reference verifier (Node, dependency-free):
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verifyDelivery(headers: Record<string,string>, rawBody: string, secret: string): boolean {
+  const subId = headers["x-subscription-id"];
+  const tick  = headers["x-subscription-tick"];
+  const ts    = headers["x-subscription-timestamp"];
+  const sig   = headers["x-subscription-signature"];
+  if (!subId || !tick || !ts || !sig) return false;
+
+  // 1. Freshness — 5-minute window
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - Number.parseInt(ts, 10)) > 300) return false;
+
+  // 2. HMAC
+  const canonical = `${subId}.${tick}.${ts}.${rawBody}`;
+  const expected = "sha256=" + createHmac("sha256", secret).update(canonical).digest("hex");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+  // 3. (caller) idempotency by (subId, tick).
+}
+```
+
+Audit F11 (2026-05-25): the bot sends the timestamp; buyer-side enforcement is the buyer's responsibility.
 
 ### Server-side defences (already wired)
 
@@ -170,5 +220,16 @@ Audit F11 (2026-05-25): the bot sends the timestamp; buyer-side enforcement is t
 - Baseline security headers on every response: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'`, plus `Cache-Control: no-store` on everything except `/health` and `/v1/resources/*`.
 - `GET /subscriptions/{id}` returns `SubscriptionView.Minimal` by default; the full projection (with buyer-identifying fields) requires `X-Subscription-Secret: <webhookSecret>` as proof of ownership (audit F5, 2026-05-25). `WebhookSecret` itself is NEVER echoed.
 - `streamPush` (sidecar internal HTTP server) binds `127.0.0.1` by default (audit F2, 2026-05-25). The Docker compose deploy sets `BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=0.0.0.0` so the API container can reach it across the docker bridge; the bridge is the trust boundary. Never publish the stream-push port to the host.
+- `streamPush` REFUSES to start without `BASICSUBSCRIPTIONBOT_API_KEY` (audit F6, 2026-05-25). The previous behaviour was "auth-required-when-set, silent-unauth-otherwise", which regressed to unauthenticated whenever the env var was forgotten. Now an operator who genuinely wants unauth (local dev where the C# tier is also unauthenticated) opts in by name via `BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH=true`.
+- `streamPush` also runs its own per-remote-address sliding-window rate limit (audit F8, 2026-05-25) — 60 req/min default; override via `BASICSUBSCRIPTIONBOT_STREAM_PUSH_RATE_LIMIT`. Independent from the C# tier's `RateLimitMiddleware`; defends against a runaway loop in `InJobStreamDeliveryService` and against any caller that reaches the docker bridge IP.
+- `WebhookSecretCipher` (AES-256-GCM at rest) wraps `webhook_secret` on Insert and unwraps on Read (audit F3, 2026-05-25). Required by default in non-Development — `Program.cs` fails fast at boot unless `WEBHOOK_SECRET_ENCRYPTION_KEY` is set (32 random bytes, base64), or the operator explicitly opts into plaintext via `BASICSUBSCRIPTIONBOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true` (transitional only — emits a loud boot warning). Generate the key with `openssl rand -base64 32`. Migration is lazy: rows that pre-date the cipher decode as-is until their next write.
+- `X-Forwarded-For` / `X-Forwarded-Proto` are trusted ONLY from CIDRs in `TRUSTED_PROXY_NETWORKS` (default `172.16.0.0/12,127.0.0.0/8,::1/128`; audit F5, 2026-05-25). On the droplet, tighten to the exact Caddy bridge CIDR. Without this, every external caller behind a reverse proxy shared one rate-limit bucket keyed by the proxy IP.
+- Field length caps in `SubscriptionService.CreateAsync` (audit F9, 2026-05-25): `jobId ≤128`, `buyerAgent ≤256`, `offeringName ≤64`, `streamJobId ≤128`, `webhookUrl ≤2048`. Defence in depth on top of the 256 KB Kestrel body cap and the 16 KB `requirement_json` cap.
+- `WebhookUrlValidator` blocklist extended (audit F7, 2026-05-25) with four additional IANA special-use ranges: IPv4 `192.0.0.0/24` (IETF protocol assignments) + `192.88.99.0/24` (6to4 anycast, deprecated), IPv6 `2002::/16` (6to4) + `2001::/32` (Teredo). These don't appear in typical Docker networks but the audit's recommendation was an allowlist rather than a blocklist; until clones move to an allowlist these closes the highest-likelihood gaps.
+
+### Deployment notes
+
+- **Kestrel listens HTTP-only on the docker bridge** (`ASPNETCORE_URLS=http://+:5000`) and Caddy terminates TLS at the public edge. There is no app-layer `UseHttpsRedirection` / HSTS — that would be a no-op on a process whose only listener is HTTP on a private bridge. The audit's Low #11 noted this is acceptable when a trusted reverse proxy is always in front; if you ever expose Kestrel directly (e.g. in a flat-network single-VM deploy), wire `UseHttpsRedirection` + HSTS + bind to `https://+:443` with a real cert before opening the port.
+- **`webhook_secret` encryption key rotation:** the cipher uses a single global `WEBHOOK_SECRET_ENCRYPTION_KEY`; rotation requires decrypting every existing row with the old key and re-encrypting with the new one in a one-shot script (the bot itself doesn't run a migration worker). Plan rotation cadence per-bot.
 
 See `docs/superpowers/specs/2026-05-03-acp-basicsubscriptionbot-boilerplate-design.md` for full design.

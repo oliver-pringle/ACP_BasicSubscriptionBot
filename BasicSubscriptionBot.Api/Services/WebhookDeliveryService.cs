@@ -22,6 +22,33 @@ public class WebhookDeliveryService
         (_allowHttpWebhooks, _disableWebhookDnsValidation) = WebhookFlagsHelper.Resolve(cfg);
     }
 
+    /// HMAC-SHA256 over a canonical envelope binding subscriptionId + tick +
+    /// timestamp + body. The subscriptionId binding (audit F4) means a captured
+    /// (tick, ts, body, sig) tuple from subscription A cannot be replayed as a
+    /// fake delivery to subscription B even when they share an HMAC secret
+    /// (unlikely in this bot since secrets are per-row, but a defence-in-depth
+    /// belt against clones that ever reuse secrets or merge subscriptions).
+    ///
+    /// Canonical: "{subscriptionId}.{tick}.{timestamp}.{body}"
+    ///
+    /// Receivers should derive the canonical string the same way using the
+    /// X-Subscription-Id + X-Subscription-Tick + X-Subscription-Timestamp
+    /// headers + the EXACT raw request body, then HMAC-SHA256 with the secret
+    /// delivered in the ACP subscription receipt. See README "Webhook receiver
+    /// requirements" for the full verification recipe.
+    public static string ComputeSignature(string subscriptionId, string secret, int tick, long timestamp, string body)
+    {
+        var canonical = $"{subscriptionId}.{tick}.{timestamp}.{body}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical));
+        return "sha256=" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// Pre-F4 signature overload, kept for callers / tests that haven't
+    /// migrated and clones that intentionally stayed on the legacy canonical.
+    /// Computes HMAC-SHA256 over "{tick}.{timestamp}.{body}" — the boilerplate
+    /// no longer uses this internally; will be removed in a future major.
+    [Obsolete("Use ComputeSignature(subscriptionId, secret, tick, timestamp, body). Audit F4: bind subscriptionId into the canonical.")]
     public static string ComputeSignature(string secret, int tick, long timestamp, string body)
     {
         var canonical = $"{tick}.{timestamp}.{body}";
@@ -51,7 +78,7 @@ public class WebhookDeliveryService
             return new DeliveryResult(false, $"webhookUrl rejected: {urlCheck.Error}");
 
         var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var sig = ComputeSignature(sub.WebhookSecret, tickNumber, ts, bodyJson);
+        var sig = ComputeSignature(sub.Id, sub.WebhookSecret, tickNumber, ts, bodyJson);
 
         try
         {

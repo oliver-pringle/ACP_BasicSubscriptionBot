@@ -10,8 +10,22 @@ import type { AcpAgent } from "@virtuals-protocol/acp-node-v2";
 //   POST /v1/internal/submit-final  -> session.submit(finalPayloadJson)  (closes job)
 //   GET  /health                    -> liveness
 //
-// Auth: X-API-Key required on the two POST endpoints; matches the bot's
-// BASICSUBSCRIPTIONBOT_API_KEY (same secret as the C# tier middleware).
+// Auth: X-API-Key required on the two POST endpoints. Audit F6 (2026-05-25)
+// tightened this: the previous behaviour was "auth required when apiKey is
+// configured" which silently degraded to UNAUTHENTICATED on any boot with an
+// unset BASICSUBSCRIPTIONBOT_API_KEY (the C# tier already fails fast in non-
+// Development, but defence-in-depth at the sidecar matters because the C#
+// tier's NoOp-on-empty-key isn't the only deployment path). Now the apiKey
+// is REQUIRED unconditionally unless the explicit escape hatch
+// BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH=true is set (for
+// local-only dev where the C# tier is also intentionally unauthenticated).
+// Setting that flag emits a loud warning every boot.
+//
+// Rate limit (audit F8): a small per-IP sliding-window limiter on the POST
+// endpoints (60 req/min default, override via
+// BASICSUBSCRIPTIONBOT_STREAM_PUSH_RATE_LIMIT). The C# tier already has its
+// own limiter on /subscriptions etc., but this is a different attack surface
+// — anyone who reaches the docker bridge IP can grief the SDK send path.
 //
 // Bind only on the docker-internal bridge  -  Caddy MUST NOT forward this port.
 // Default port 6001 matches InJobStreamDeliveryService's default BaseUrl.
@@ -34,6 +48,34 @@ import type { AcpAgent } from "@virtuals-protocol/acp-node-v2";
 // switch to sendJobMessage per-offering.
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MB matches C# InJobStreamDeliveryService cap
+
+// F8: small in-memory per-IP sliding-window rate limit. Independent from
+// the C# tier's RateLimitMiddleware — different process, different attack
+// surface. Default 60 req/min; override via
+// BASICSUBSCRIPTIONBOT_STREAM_PUSH_RATE_LIMIT (integer, requests per minute).
+const DEFAULT_RATE_LIMIT_PER_MIN = 60;
+const RATE_WINDOW_MS = 60_000;
+interface Bucket { windowStart: number; count: number; }
+const rateBuckets = new Map<string, Bucket>();
+
+function rateLimitExceeded(remoteIp: string, capacity: number): boolean {
+  const now = Date.now();
+  const b = rateBuckets.get(remoteIp);
+  if (!b || now - b.windowStart > RATE_WINDOW_MS) {
+    rateBuckets.set(remoteIp, { windowStart: now, count: 1 });
+    // Opportunistic eviction every ~256 inserts. Bounded growth even if the
+    // bridge sees a flood of distinct IPs (unlikely on a docker-internal lane).
+    if (rateBuckets.size > 256) {
+      const cutoff = now - RATE_WINDOW_MS * 2;
+      for (const [k, v] of rateBuckets) {
+        if (v.windowStart < cutoff) rateBuckets.delete(k);
+      }
+    }
+    return false;
+  }
+  b.count += 1;
+  return b.count > capacity;
+}
 
 export interface StreamPushServerOptions {
   agent: AcpAgent;
@@ -64,24 +106,58 @@ interface SubmitFinalBody {
 export function startStreamPushServer(opts: StreamPushServerOptions): Server {
   const { agent, apiKey, port, bindHost = "127.0.0.1" } = opts;
 
-  // Fail-fast: non-loopback bind without auth in production-like NODE_ENV
-  // would leave /v1/internal/push-tick + /submit-final reachable to any
-  // network neighbour. The C# tier already enforces this on its own apiKey
-  // env var, but defence in depth here catches a sidecar started in
-  // isolation against a misconfigured shared secret.
+  // F6 (2026-05-25): apiKey is REQUIRED unconditionally unless the explicit
+  // escape hatch BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH=true is
+  // set. The previous "auth-required-when-set, silent-unauth-otherwise" shape
+  // silently regressed to unauthenticated whenever an operator forgot the env
+  // var. Now an operator who really wants unauth (local dev where the C# tier
+  // is also unauthenticated) opts in by name.
+  const allowUnauthenticated =
+    (process.env.BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH ?? "").toLowerCase() === "true";
+  if (!apiKey && !allowUnauthenticated) {
+    throw new Error(
+      `[streamPush] REFUSING to start without BASICSUBSCRIPTIONBOT_API_KEY. ` +
+      `/v1/internal/push-tick + /v1/internal/submit-final would be unauthenticated. ` +
+      `Set BASICSUBSCRIPTIONBOT_API_KEY, or set ` +
+      `BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH=true to explicitly opt into ` +
+      `unauth mode for local-only dev (do NOT set this in any deployed environment).`);
+  }
+  if (!apiKey && allowUnauthenticated) {
+    console.warn(
+      `[streamPush] BASICSUBSCRIPTIONBOT_ALLOW_UNAUTHENTICATED_STREAM_PUSH=true — ` +
+      `/v1/internal/push-tick + /v1/internal/submit-final are UNAUTHENTICATED. ` +
+      `Anyone reaching ${bindHost}:${port} can send ACP messages on every open job.`);
+  }
+
+  // Original bind-host defence-in-depth still applies (pre-F6 path): a
+  // non-loopback bind without auth was previously also caught here. With F6
+  // closed, the unauth branch above already refuses to start unless the new
+  // escape hatch is set — keep this for older test fixtures and clones that
+  // still skip the env var path.
   if (bindHost !== "127.0.0.1" && bindHost !== "::1" && !apiKey) {
     const isProdLike = (process.env.NODE_ENV ?? "").toLowerCase() === "production";
-    const msg = `[streamPush] REFUSING to bind ${bindHost}:${port} without an apiKey — would expose /v1/internal/push-tick + /submit-final unauthenticated to the bind interface. ` +
-                `Set BASICSUBSCRIPTIONBOT_API_KEY, or set BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=127.0.0.1 for a loopback-only local boot.`;
+    const msg = `[streamPush] REFUSING to bind ${bindHost}:${port} without an apiKey — would expose /v1/internal/push-tick + /submit-final unauthenticated to the bind interface.`;
     if (isProdLike) {
       throw new Error(msg);
     }
     console.warn(msg + " (NODE_ENV != production — booting anyway with a warning).");
   }
 
+  // F8 rate-limit capacity — read once at boot so test fixtures can override.
+  const rateLimitPerMin = (() => {
+    const raw = process.env.BASICSUBSCRIPTIONBOT_STREAM_PUSH_RATE_LIMIT;
+    if (!raw || raw.trim() === "") return DEFAULT_RATE_LIMIT_PER_MIN;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 1) {
+      console.warn(`[streamPush] invalid rate-limit '${raw}', falling back to ${DEFAULT_RATE_LIMIT_PER_MIN}`);
+      return DEFAULT_RATE_LIMIT_PER_MIN;
+    }
+    return n;
+  })();
+
   const server = createServer(async (req, res) => {
     try {
-      await handle(req, res, agent, apiKey);
+      await handle(req, res, agent, apiKey, rateLimitPerMin);
     } catch (err) {
       console.error("[streamPush] unhandled error:", err);
       writeJson(res, 500, { error: "internal" });
@@ -90,7 +166,7 @@ export function startStreamPushServer(opts: StreamPushServerOptions): Server {
 
   server.listen(port, bindHost, () => {
     const authNote = apiKey ? "X-API-Key enforced" : "UNAUTHENTICATED (apiKey unset)";
-    console.log(`[streamPush] listening on ${bindHost}:${port} (${authNote})`);
+    console.log(`[streamPush] listening on ${bindHost}:${port} (${authNote}, ${rateLimitPerMin} req/min/IP)`);
   });
   return server;
 }
@@ -99,7 +175,8 @@ async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   agent: AcpAgent,
-  apiKey: string | undefined
+  apiKey: string | undefined,
+  rateLimitPerMin: number
 ) {
   const url = req.url ?? "/";
   const method = req.method ?? "GET";
@@ -111,7 +188,20 @@ async function handle(
 
   if (method !== "POST") { writeJson(res, 405, { error: "method not allowed" }); return; }
 
-  // Auth  -  same secret as the C# tier; constant-time compare.
+  // F8 rate-limit on POST endpoints — keyed by socket remoteAddress. On the
+  // docker bridge that's the C# container's IP, so this primarily defends
+  // against a runaway loop in InJobStreamDeliveryService. If the limit is
+  // hit, return 429 — the C# RetryWorker will back off and retry.
+  const remoteIp = req.socket.remoteAddress ?? "unknown";
+  if (rateLimitExceeded(remoteIp, rateLimitPerMin)) {
+    writeJson(res, 429, { error: `rate limit exceeded; ${rateLimitPerMin} req/min per remote address` });
+    return;
+  }
+
+  // Auth — same secret as the C# tier; constant-time compare. F6: apiKey is
+  // required at start-up unless the unauth-dev escape hatch is set, so this
+  // `if` short-circuit is the dev-only path; production always enters the
+  // branch.
   if (apiKey) {
     const provided = req.headers["x-api-key"];
     const providedStr = Array.isArray(provided) ? provided[0] : provided;

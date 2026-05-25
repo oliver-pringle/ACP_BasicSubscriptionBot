@@ -109,6 +109,18 @@ public static class WebhookUrlValidator
                                                     { reason = "ipv6 documentation 2001:db8::/32"; return true; }
             if (v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b)
                                                     { reason = "ipv6 ipv4-translation 64:ff9b::/96"; return true; }
+            // F7 additions:
+            // 2002::/16 — 6to4 anycast tunnel relay. Deprecated (RFC 7526) but
+            // still routable to IPv4-encoded endpoints that may sit on RFC1918
+            // when stripped, so block at this layer.
+            if (v6[0] == 0x20 && v6[1] == 0x02)
+                                                    { reason = "ipv6 6to4 2002::/16";  return true; }
+            // 2001::/32 — Teredo IPv6-over-UDP-over-IPv4 tunnel. Embedded
+            // server IP may be a private/metadata address; refuse the whole /32.
+            // Note: this is broader than the documentation range above and runs
+            // AFTER it, so 2001:db8::/32 still matches the docs reason first.
+            if (v6[0] == 0x20 && v6[1] == 0x01 && v6[2] == 0x00 && v6[3] == 0x00)
+                                                    { reason = "ipv6 teredo 2001::/32"; return true; }
         }
 
         if (addr.AddressFamily == AddressFamily.InterNetwork ||
@@ -128,6 +140,15 @@ public static class WebhookUrlValidator
             if (b[0] == 198 && b[1] == 51  && b[2] == 100) { reason = "docs 198.51.100.0/24"; return true; }
             if (b[0] == 203 && b[1] == 0   && b[2] == 113) { reason = "docs 203.0.113.0/24"; return true; }
             if (b[0] == 198 && (b[1] == 18 || b[1] == 19)) { reason = "benchmark 198.18/15"; return true; }
+            // F7 additions:
+            // 192.0.0.0/24 — IETF protocol assignments (DS-Lite, NAT64, etc.).
+            // 192.0.0.0/29 specifically holds DS-Lite anycast; the whole /24
+            // is reserved and never legitimate as a webhook target. The /24
+            // covers 192.0.2.0/24 (docs) by accident — check the more specific
+            // docs range FIRST above so we report the better-known reason.
+            if (b[0] == 192 && b[1] == 0   && b[2] == 0)   { reason = "iana 192.0.0.0/24";   return true; }
+            // 192.88.99.0/24 — 6to4 anycast relay (deprecated per RFC 7526).
+            if (b[0] == 192 && b[1] == 88  && b[2] == 99)  { reason = "6to4 anycast 192.88.99.0/24"; return true; }
         }
 
         reason = "";

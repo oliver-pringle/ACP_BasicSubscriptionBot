@@ -20,6 +20,17 @@ public class SubscriptionService
     public const int MaxRequirementJsonBytes = 16 * 1024;     // 16 KB
     public static readonly TimeSpan MaxFutureWindow = TimeSpan.FromDays(90);
 
+    // Audit F9: explicit per-field length caps on subscription identifiers.
+    // Kestrel's 256 KB body cap and the 16 KB requirement_json cap above
+    // already bound the worst case, but field-level limits keep DB rows, log
+    // lines, and downstream ACP calls from carrying unexpectedly long values
+    // (e.g. attacker spams identifiers under the body cap to bloat tables).
+    public const int MaxJobIdLength        = 128;   // ACP jobIds are uint256 in decimal — 78 chars max
+    public const int MaxBuyerAgentLength   = 256;   // EVM addresses are 42 chars; leaves headroom for future fmt
+    public const int MaxOfferingNameLength = 64;    // marketplace caps offering name at 20; 64 covers any rename
+    public const int MaxStreamJobIdLength  = 128;
+    public const int MaxWebhookUrlLength   = 2048;  // 2 KB cap; longer URLs almost certainly buyer error
+
     // inJobStream-mode subscriptions keep an ACP job open for the entire
     // delivery window. The V2 indexer's tolerance for long-open jobs is
     // unverified beyond ~hours (see Phase-1 spec Q1). Hard-cap inJobStream
@@ -41,6 +52,31 @@ public class SubscriptionService
 
     public async Task<CreateSubscriptionResponse> CreateAsync(CreateSubscriptionRequest req)
     {
+        // Audit F9: per-field length caps. The route handler in Program.cs has
+        // already null-checked JobId + OfferingName, so we only need to upper-
+        // bound them here. BuyerAgent / StreamJobId / webhookUrl come straight
+        // from the request body; null/empty is allowed for some shapes but a
+        // pathologically long value is never legitimate.
+        if (req.JobId.Length > MaxJobIdLength)
+            throw new InvalidOperationException($"jobId exceeds {MaxJobIdLength} characters");
+        if (!string.IsNullOrEmpty(req.BuyerAgent) && req.BuyerAgent.Length > MaxBuyerAgentLength)
+            throw new InvalidOperationException($"buyerAgent exceeds {MaxBuyerAgentLength} characters");
+        if (req.OfferingName.Length > MaxOfferingNameLength)
+            throw new InvalidOperationException($"offeringName exceeds {MaxOfferingNameLength} characters");
+        if (!string.IsNullOrEmpty(req.StreamJobId) && req.StreamJobId.Length > MaxStreamJobIdLength)
+            throw new InvalidOperationException($"streamJobId exceeds {MaxStreamJobIdLength} characters");
+
+        // DEFERRED (KnownBugs P27): the boilerplate trusts that the sidecar
+        // is the only caller and that any (jobId, buyerAgent, offeringName)
+        // tuple reaching this method already corresponds to a funded ACP job.
+        // The audit's High #2 recommends verifying via the ACP marketplace
+        // API before insert — job exists / is funded / seller is us / buyer
+        // matches / offering matches. That's a substantial cross-cutting
+        // change requiring SDK queries on every create-subscription request
+        // (latency + new failure mode). When a clone is sensitive to spoofed
+        // create-subscription calls, lift the canonical verifier from
+        // ButlerBridge once it ships. See security-audit/SecurityBot/KnownBugs.md#p27.
+
         if (!KnownSubscriptionOfferings.Contains(req.OfferingName))
             throw new InvalidOperationException($"unknown offering: {req.OfferingName}");
 
@@ -84,6 +120,11 @@ public class SubscriptionService
         if (pushMode == "webhook")
         {
             webhookUrl = AsString(req.Requirement, "webhookUrl");
+            // F9 length cap before SSRF check — a 1 MB URL has no legitimate
+            // shape and would otherwise reach Uri.TryCreate + DNS resolution.
+            if (webhookUrl.Length > MaxWebhookUrlLength)
+                throw new InvalidOperationException(
+                    $"webhookUrl exceeds {MaxWebhookUrlLength} characters");
             var urlCheck = WebhookUrlValidator.Validate(webhookUrl, _allowHttpWebhooks, _disableWebhookDnsValidation);
             if (!urlCheck.Ok)
                 throw new InvalidOperationException(urlCheck.Error!);

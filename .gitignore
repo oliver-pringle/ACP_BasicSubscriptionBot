@@ -28,5 +28,10 @@ BasicSubscriptionBot.Api/*.db-journal
 BasicSubscriptionBot.Api/*.db-shm
 BasicSubscriptionBot.Api/*.db-wal
 
+# RuFlo agent scratch DBs (created when the workspace boots a Ruflo agent at
+# the project root or in acp-v2/); never carry source-of-truth state.
+ruvector.db
+acp-v2/ruvector.db
+
 # OS
 Thumbs.db
