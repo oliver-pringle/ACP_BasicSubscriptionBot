@@ -1,6 +1,8 @@
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using BasicSubscriptionBot.Api.Data;
+using BasicSubscriptionBot.Api.Middleware;
 using BasicSubscriptionBot.Api.Models;
 using BasicSubscriptionBot.Api.Services;
 using BasicSubscriptionBot.Api.Workers;
@@ -19,7 +21,22 @@ builder.Services.AddSingleton<TickEchoRepository>();
 builder.Services.AddSingleton<EchoService>();
 builder.Services.AddSingleton<SubscriptionService>();
 builder.Services.AddSingleton<TickExecutorService>();
-builder.Services.AddHttpClient<WebhookDeliveryService>();
+// WebhookDeliveryService is hardened against DNS-rebind TOCTOU + 3xx
+// redirects (audit F1): the SocketsHttpHandler.ConnectCallback re-validates
+// every resolved IPEndPoint against WebhookUrlValidator.IsConnectBlocked
+// before the TCP connect, and AllowAutoRedirect=false ensures a 302 Location
+// can't redirect a validated public webhook to 169.254.169.254 / 127.0.0.1
+// / 10.0.0.0/8 etc. Lifted from ACP_OracleBot v0.7 / ACP_SolanaBot 2026-05-24.
+builder.Services.AddHttpClient<WebhookDeliveryService>()
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        ConnectCallback   = WebhookConnectCallbacks.PinValidatedIp,
+    });
+// InJobStreamDeliveryService targets the sidecar's internal HTTP server at
+// an operator-controlled URL (BASICSUBSCRIPTIONBOT_STREAM_PUSH_URL), NOT a
+// buyer-supplied address — so the SSRF lane doesn't apply. Kept on the
+// default handler.
 builder.Services.AddHttpClient<InJobStreamDeliveryService>();
 
 // Hosted workers
@@ -73,6 +90,32 @@ if (!app.Environment.IsDevelopment())
             "Without this check, an attacker can register a webhook whose hostname DNS-rebinds " +
             "to a private/metadata address — exactly the SSRF lane this flag exists to test.");
 }
+
+// Per-IP + per-X-API-Key sliding-window rate limit on heavy / write endpoints
+// (audit F9). Placed BEFORE auth so unauthenticated floods are also throttled.
+// Tunable via RateLimit:HeavyEndpointCapPerIp + RateLimit:HeavyEndpointCapPerApiKey.
+app.UseMiddleware<RateLimitMiddleware>();
+
+// Baseline security headers on every response (audit F10). OnStarting so
+// downstream middleware can't accidentally erase them.
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.OnStarting(() =>
+    {
+        var p = ctx.Request.Path.Value ?? string.Empty;
+        ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        ctx.Response.Headers["Referrer-Policy"]        = "no-referrer";
+        ctx.Response.Headers["X-Frame-Options"]        = "DENY";
+        ctx.Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'";
+        // /health + /v1/resources/* are deliberately CACHE-friendly — they're
+        // intended for orchestrator pre-flight probes that benefit from a
+        // short proxy TTL. Everything else is no-store.
+        if (!p.StartsWith("/v1/resources/", StringComparison.Ordinal) && p != "/health")
+            ctx.Response.Headers["Cache-Control"] = "no-store";
+        return Task.CompletedTask;
+    });
+    await next();
+});
 
 // X-API-Key middleware. Required in any non-Development environment — a fail-
 // open default plus a bad .env deploy or env-load failure would silently expose
@@ -163,10 +206,42 @@ app.MapPost("/subscriptions", async (CreateSubscriptionRequest req, Subscription
     }
 });
 
-app.MapGet("/subscriptions/{id}", async (string id, SubscriptionRepository repo) =>
+// GET /subscriptions/{id}
+//   Default response = SubscriptionView.Minimal — excludes buyer-sensitive
+//   fields (RequirementJson, WebhookUrl, BuyerAgent, StreamJobId). Any
+//   X-API-Key-authenticated caller can poll status + counts; nothing buyer-
+//   identifying leaks.
+//
+//   Pass header X-Subscription-Secret: <webhookSecret> for the FULL projection
+//   (still excludes WebhookSecret itself — the caller proves they already
+//   know it, no need to echo it back). The secret was delivered ONCE in the
+//   ACP subscription receipt, so only the buyer holds it. Constant-time
+//   compare against the stored secret. Closes audit F5.
+//
+//   inJobStream subscriptions have no webhookSecret — the full projection
+//   is unreachable via this lane for them; only the minimal view is
+//   returned regardless of headers. Operators on the box can hit the
+//   SQLite file directly.
+app.MapGet("/subscriptions/{id}", async (string id, HttpContext ctx, SubscriptionRepository repo) =>
 {
     var sub = await repo.GetByIdAsync(id);
-    return sub is null ? Results.NotFound() : Results.Ok(SubscriptionView.From(sub));
+    if (sub is null) return Results.NotFound();
+
+    if (ctx.Request.Headers.TryGetValue("X-Subscription-Secret", out var providedHeader) &&
+        !string.IsNullOrEmpty(sub.WebhookSecret))
+    {
+        var providedBytes = Encoding.UTF8.GetBytes(providedHeader.ToString());
+        var expectedBytes = Encoding.UTF8.GetBytes(sub.WebhookSecret);
+        if (providedBytes.Length == expectedBytes.Length &&
+            CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes))
+        {
+            return Results.Ok(SubscriptionView.Full(sub));
+        }
+        // Wrong secret — fall through to minimal view (not 401: the caller
+        // already has X-API-Key, the header is just a privilege upgrade).
+    }
+
+    return Results.Ok(SubscriptionView.Minimal(sub));
 });
 
 // ACP v2 Resources — public, free, parameterised endpoints mirrored

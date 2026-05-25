@@ -10,7 +10,7 @@ namespace BasicSubscriptionBot.Api.Services;
 //
 // Production: leave all three unset. Program.cs refuses to boot with the
 // legacy flag in any non-Development environment.
-internal static class WebhookFlagsHelper
+public static class WebhookFlagsHelper
 {
     public static (bool AllowHttpWebhooks, bool DisableWebhookDnsValidation) Resolve(IConfiguration? cfg)
     {

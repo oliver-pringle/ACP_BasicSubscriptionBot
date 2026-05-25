@@ -11,9 +11,15 @@ public class TickExecutorService
 
     public async Task<string> ComputePayloadAsync(Subscription sub, int tickNumber)
     {
+        // Both offering names share the same per-tick payload — only the
+        // delivery mode differs. SubscriptionService accepts both, and
+        // TickSchedulerWorker branches on PushMode (webhook vs inJobStream)
+        // for transport; payload compute is symmetric. Pre-2026-05-25 the
+        // switch only handled "tick_echo" and every tick_stream_echo
+        // subscription threw at compute time (audit F3).
         return sub.OfferingName switch
         {
-            "tick_echo" => await ComputeTickEcho(sub, tickNumber),
+            "tick_echo" or "tick_stream_echo" => await ComputeTickEcho(sub, tickNumber),
             _ => throw new InvalidOperationException($"unknown offering: {sub.OfferingName}")
         };
     }

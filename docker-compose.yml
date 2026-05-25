@@ -12,10 +12,14 @@ services:
       # localhost. If you publish ports or rename the service, update this list
       # (or set AllowedHosts in your shell env before `docker compose up`).
       - AllowedHosts=basicsubscriptionbot-api;localhost
-      # Optional shared secret. Set BASICSUBSCRIPTIONBOT_API_KEY in your host shell (or in
+      # REQUIRED in any non-Development environment — Program.cs fails fast at
+      # boot if ASPNETCORE_ENVIRONMENT != "Development" and this env var is
+      # empty. Set BASICSUBSCRIPTIONBOT_API_KEY in your host shell (or in
       # ./acp-v2/.env, which docker compose auto-loads at the project root via
-      # `--env-file`) to enable X-API-Key auth between the sidecar and the API.
-      - BASICSUBSCRIPTIONBOT_API_KEY=${BASICSUBSCRIPTIONBOT_API_KEY:-}
+      # `--env-file`) to a high-entropy random string. Use `:?…` expansion to
+      # fail compose-up early with a clear message instead of failing inside
+      # the container at boot.
+      - BASICSUBSCRIPTIONBOT_API_KEY=${BASICSUBSCRIPTIONBOT_API_KEY:?BASICSUBSCRIPTIONBOT_API_KEY is required (high-entropy random string, e.g. `openssl rand -hex 32`)}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user). One-time
       # setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.
@@ -32,6 +36,13 @@ services:
     env_file: ./acp-v2/.env
     environment:
       - BASICSUBSCRIPTIONBOT_API_URL=http://basicsubscriptionbot-api:5000
+      # streamPush binds 127.0.0.1 by default (safe). Multi-container Docker
+      # needs 0.0.0.0 so the API container can reach it across the docker
+      # bridge — the bridge itself is the trust boundary, NOT this port.
+      # CRITICAL: do NOT publish this port to the host via `ports:` — it
+      # carries inJobStream tick deliveries and is X-API-Key-gated, but
+      # treating the docker bridge as the perimeter is the design intent.
+      - BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=0.0.0.0
     networks: [basicsubscriptionbot]
 
 networks:

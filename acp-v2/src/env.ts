@@ -11,6 +11,12 @@ export interface AcpEnv {
   baseRpcUrl: string;
   deployerPrivateKey?: string;
   streamPushPort: number;
+  /// Network interface streamPush binds to. Defaults to 127.0.0.1
+  /// (loopback-only). Docker multi-container deploys set this to "0.0.0.0"
+  /// via the BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST env var; the
+  /// docker-internal bridge is then the trust boundary. Never publish the
+  /// stream-push port to the host (no docker-compose `ports:` entry).
+  streamPushBindHost: string;
 }
 
 const REQUIRED = [
@@ -77,6 +83,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
     streamPushPort = parsed;
   }
 
+  const bindRaw = source.BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST;
+  const streamPushBindHost =
+    bindRaw && bindRaw.trim() !== "" ? bindRaw.trim() : "127.0.0.1";
+
   return {
     walletAddress: source.ACP_WALLET_ADDRESS!,
     walletId: source.ACP_WALLET_ID!,
@@ -88,5 +98,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
     baseRpcUrl,
     deployerPrivateKey,
     streamPushPort,
+    streamPushBindHost,
   };
 }

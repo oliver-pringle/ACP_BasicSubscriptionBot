@@ -140,6 +140,35 @@ hires would silently break a multi-tick subscription mid-run.
 
 ## Security
 
-Webhook scheme: HTTPS only (override `ALLOW_INSECURE_WEBHOOKS=true` for dev). HMAC-SHA256 signature header `X-Subscription-Signature`. Webhook secret returned **once** in the receipt deliverable — buyer must persist. Buyers MUST treat duplicate `(subscriptionId, tick)` as no-op (we may retry).
+Webhook scheme: HTTPS only (override `ALLOW_INSECURE_WEBHOOKS=true` for dev — refused in non-Development). HMAC-SHA256 signature header `X-Subscription-Signature`. Webhook secret returned **once** in the receipt deliverable — buyer must persist.
+
+### Buyer-side webhook verification checklist (REQUIRED)
+
+Every tick the bot delivers carries four headers:
+
+| Header | Purpose |
+|---|---|
+| `X-Subscription-Id` | Subscription identity (same value for every tick on this subscription) |
+| `X-Subscription-Tick` | Tick number — monotonic per subscription starting at 1 |
+| `X-Subscription-Timestamp` | Unix seconds at the moment the signature was computed |
+| `X-Subscription-Signature` | `sha256=` + HMAC-SHA256(`webhookSecret`, `tick + "." + timestamp + "." + body`) |
+
+Buyers MUST do ALL of the following to be safe against replay:
+
+1. **Verify the HMAC.** Recompute and constant-time-compare. Reject mismatches.
+2. **Verify timestamp freshness** — reject if `abs(now_unix_sec - X-Subscription-Timestamp) > 300` (±5 minutes). The bot's `WebhookDeliveryService` sets the timestamp at signature time; legitimate ticks always arrive inside a small window. Without this check, an attacker who captures a single delivered request can replay it indefinitely (the HMAC alone has no expiry).
+3. **Deduplicate by `(subscriptionId, tick)`** — accept the first delivery per tuple and respond 200; respond 200 (no-op) to all subsequent identical deliveries. The bot retries on transient failures, so a buyer hard-throwing on duplicate ticks would cause spurious retry storms.
+4. (Optional but recommended) **Enforce monotonic ticks** — reject any tick < `max_seen_tick - 1`. Combined with #3 this catches both replay and re-ordering.
+
+Audit F11 (2026-05-25): the bot sends the timestamp; buyer-side enforcement is the buyer's responsibility. If your buyer integration is in TypeScript and you want a reference verifier, lift the pattern from `ACP_RevokeBot/docs/runbook.md` (first portfolio buyer-side consumer of this contract).
+
+### Server-side defences (already wired)
+
+- `WebhookUrlValidator` rejects loopback, RFC1918, link-local + metadata `169.254/16`, CGNAT, IPv6 ULA/link-local, and any non-`https://` scheme on subscribe AND every delivery tick.
+- `WebhookDeliveryService`'s `HttpClient` is configured with `SocketsHttpHandler.ConnectCallback = WebhookConnectCallbacks.PinValidatedIp` (audit F1, 2026-05-25) — every TCP connect re-resolves and re-validates the IP, closing the DNS-rebind TOCTOU between validate-time and connect-time. Paired with `AllowAutoRedirect=false` so a 302 Location can't redirect a validated public webhook to a metadata/private IP.
+- `RateLimitMiddleware` (audit F9, 2026-05-25) — 60 req/min/IP + 600 req/min/key on heavy endpoints, placed before auth so unauthenticated floods are also throttled.
+- Baseline security headers on every response: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'`, plus `Cache-Control: no-store` on everything except `/health` and `/v1/resources/*`.
+- `GET /subscriptions/{id}` returns `SubscriptionView.Minimal` by default; the full projection (with buyer-identifying fields) requires `X-Subscription-Secret: <webhookSecret>` as proof of ownership (audit F5, 2026-05-25). `WebhookSecret` itself is NEVER echoed.
+- `streamPush` (sidecar internal HTTP server) binds `127.0.0.1` by default (audit F2, 2026-05-25). The Docker compose deploy sets `BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=0.0.0.0` so the API container can reach it across the docker bridge; the bridge is the trust boundary. Never publish the stream-push port to the host.
 
 See `docs/superpowers/specs/2026-05-03-acp-basicsubscriptionbot-boilerplate-design.md` for full design.

@@ -178,6 +178,7 @@ async function main() {
     agent,
     apiKey: env.apiKey,
     port: env.streamPushPort,
+    bindHost: env.streamPushBindHost,
   });
 
   await agent.start();

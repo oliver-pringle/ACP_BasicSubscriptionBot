@@ -16,6 +16,17 @@ import type { AcpAgent } from "@virtuals-protocol/acp-node-v2";
 // Bind only on the docker-internal bridge  -  Caddy MUST NOT forward this port.
 // Default port 6001 matches InJobStreamDeliveryService's default BaseUrl.
 //
+// Bind host (audit F2): defaults to 127.0.0.1 (loopback only). The Docker
+// multi-container deploy MUST set BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=0.0.0.0
+// explicitly in docker-compose.yml so the C# container can reach it across
+// the docker bridge. The previous behaviour of `server.listen(port)` defaulting
+// to "all interfaces" silently exposed /v1/internal/* to anyone reaching the
+// container's IP — a single docker port-publish change or a misconfigured
+// reverse proxy turned that into an unauthenticated path if the API key was
+// unset (e.g. local dev). We refuse to bind to a non-loopback address when
+// NODE_ENV=production AND no API key is configured (defence in depth on top
+// of the C# tier's own fail-closed apiKey check).
+//
 // We deliberately use the SDK's REST send path (agent.sendMessage, awaitable +
 // durable) rather than the transport-push agent.sendJobMessage (fire-and-
 // forget). Trades ~250ms latency for delivery confidence  -  the right choice
@@ -28,6 +39,11 @@ export interface StreamPushServerOptions {
   agent: AcpAgent;
   apiKey?: string;
   port: number;
+  /// Network interface to bind. Default "127.0.0.1" (loopback). For Docker
+  /// multi-container deployments set to "0.0.0.0" — the docker-internal
+  /// bridge is then the trust boundary, NOT this port. Never publish this
+  /// port to the host via docker-compose `ports:`.
+  bindHost?: string;
 }
 
 interface PushTickBody {
@@ -46,7 +62,22 @@ interface SubmitFinalBody {
 }
 
 export function startStreamPushServer(opts: StreamPushServerOptions): Server {
-  const { agent, apiKey, port } = opts;
+  const { agent, apiKey, port, bindHost = "127.0.0.1" } = opts;
+
+  // Fail-fast: non-loopback bind without auth in production-like NODE_ENV
+  // would leave /v1/internal/push-tick + /submit-final reachable to any
+  // network neighbour. The C# tier already enforces this on its own apiKey
+  // env var, but defence in depth here catches a sidecar started in
+  // isolation against a misconfigured shared secret.
+  if (bindHost !== "127.0.0.1" && bindHost !== "::1" && !apiKey) {
+    const isProdLike = (process.env.NODE_ENV ?? "").toLowerCase() === "production";
+    const msg = `[streamPush] REFUSING to bind ${bindHost}:${port} without an apiKey — would expose /v1/internal/push-tick + /submit-final unauthenticated to the bind interface. ` +
+                `Set BASICSUBSCRIPTIONBOT_API_KEY, or set BASICSUBSCRIPTIONBOT_STREAM_PUSH_BIND_HOST=127.0.0.1 for a loopback-only local boot.`;
+    if (isProdLike) {
+      throw new Error(msg);
+    }
+    console.warn(msg + " (NODE_ENV != production — booting anyway with a warning).");
+  }
 
   const server = createServer(async (req, res) => {
     try {
@@ -57,8 +88,9 @@ export function startStreamPushServer(opts: StreamPushServerOptions): Server {
     }
   });
 
-  server.listen(port, () => {
-    console.log(`[streamPush] listening on :${port}`);
+  server.listen(port, bindHost, () => {
+    const authNote = apiKey ? "X-API-Key enforced" : "UNAUTHENTICATED (apiKey unset)";
+    console.log(`[streamPush] listening on ${bindHost}:${port} (${authNote})`);
   });
   return server;
 }
