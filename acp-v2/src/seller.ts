@@ -156,7 +156,7 @@ async function main() {
         ticksPurchased: receipt.ticksPurchased,
         intervalSeconds: receipt.intervalSeconds,
         expiresAt: receipt.expiresAt,
-        signatureScheme: "HMAC-SHA256(secret, tick + '.' + timestamp + '.' + body)"
+        signatureScheme: "HMAC-SHA256(secret, subscriptionId + '.' + tick + '.' + timestamp + '.' + body)"
       });
       await session.submit(payload);
       console.log(`[seller] submitted subscription receipt jobId=${session.jobId} subId=${receipt.subscriptionId}`);
