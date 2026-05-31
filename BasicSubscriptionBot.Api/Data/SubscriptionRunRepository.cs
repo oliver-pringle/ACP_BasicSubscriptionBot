@@ -12,11 +12,21 @@ public class SubscriptionRunRepository
     {
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
+        // Audit (2026-05-30 #X1 / P59): INSERT OR IGNORE makes this idempotent on
+        // the UNIQUE(subscription_id, tick_number) key, then SELECT the run id by
+        // (sub, tick) — NOT last_insert_rowid() (which returns 0 / a stale rowid
+        // when the insert is ignored). A plain INSERT threw SQLITE_CONSTRAINT when
+        // a prior crash left a pending run for this tick without advancing the
+        // subscription: on restart GetDueAsync re-selects the sub, the same tick
+        // recomputes, and the throw propagated up to the worker's catch-and-continue
+        // — sticking the subscription forever. Now a re-processed tick re-uses the
+        // existing pending row and the tick can progress. This is the BOILERPLATE
+        // SOURCE of the bug fixed in LiquidGuard (H4); every clone inherits this fix.
         cmd.CommandText = @"
-            INSERT INTO subscription_runs
+            INSERT OR IGNORE INTO subscription_runs
                 (subscription_id, tick_number, scheduled_at, payload_json, delivery_status, attempts)
             VALUES ($s, $t, $sa, $p, 'pending', 0);
-            SELECT last_insert_rowid();";
+            SELECT id FROM subscription_runs WHERE subscription_id = $s AND tick_number = $t;";
         cmd.Parameters.AddWithValue("$s", subscriptionId);
         cmd.Parameters.AddWithValue("$t", tickNumber);
         cmd.Parameters.AddWithValue("$sa", scheduledAt.ToString("O"));

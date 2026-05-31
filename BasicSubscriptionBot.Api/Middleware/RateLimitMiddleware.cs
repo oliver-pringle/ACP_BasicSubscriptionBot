@@ -44,6 +44,22 @@ public sealed class RateLimitMiddleware
         "/echo",            // POST writes a row; GET reads
     };
 
+    /// Audit (2026-05-30 #X2 / P52): public + static so a unit test can assert
+    /// every heavy MapPost/MapGet route is covered by a prefix. The boilerplate's
+    /// own routes ARE covered, but clones (RevokeBot, LiquidGuard) drifted — kebab
+    /// vs underscore, or never extending this list as endpoints were added — and
+    /// silently un-throttled their heavy routes. Shipping `IsHeavyPath` + a
+    /// RateLimitCoverageTests in the boilerplate means every clone inherits the
+    /// drift-protection: a heavy route with no matching prefix fails the build.
+    /// (Beware StartsWith asymmetry: a more-specific prefix does NOT cover a
+    /// shorter sibling — prefer the base stem.)
+    public static bool IsHeavyPath(string path)
+    {
+        foreach (var prefix in HeavyPathPrefixes)
+            if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     public RateLimitMiddleware(RequestDelegate next, IConfiguration cfg)
     {
         _next = next;
@@ -56,12 +72,7 @@ public sealed class RateLimitMiddleware
     {
         var path = ctx.Request.Path.Value ?? "";
 
-        var isHeavy = false;
-        foreach (var prefix in HeavyPathPrefixes)
-        {
-            if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { isHeavy = true; break; }
-        }
-        if (!isHeavy)
+        if (!IsHeavyPath(path))
         {
             await _next(ctx);
             return;

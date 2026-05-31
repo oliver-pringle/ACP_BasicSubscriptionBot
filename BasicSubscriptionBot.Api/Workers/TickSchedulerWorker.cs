@@ -69,6 +69,15 @@ public class TickSchedulerWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Payload compute failed for sub {Id} tick {N}", sub.Id, nextTickNumber);
+            // Audit (2026-05-30 #X3): advance next_run_at + record the failure
+            // rather than a bare return. A bare return left next_run_at unchanged,
+            // so GetDueAsync (status='active' AND next_run_at<=now) re-selected the
+            // sub on every poll forever (stuck noisy worker burning compute + log
+            // spam), and the consecutive-failures/suspend backstop in
+            // RecordTickResultAsync never engaged. Mirrors the delivery-failure
+            // accounting below (completed:false). BOILERPLATE SOURCE of RevokeBot H4.
+            var failNextRunAt = DateTime.UtcNow.AddSeconds(sub.IntervalSeconds);
+            await subs.RecordTickResultAsync(sub.Id, false, DateTime.UtcNow, failNextRunAt, false);
             return;
         }
 

@@ -281,6 +281,13 @@ app.MapPost("/subscriptions", async (CreateSubscriptionRequest req, Subscription
         var resp = await svc.CreateAsync(req);
         return Results.Ok(resp);
     }
+    catch (SubscriptionLimitException)
+    {
+        // Audit (2026-05-30 #M3 / P60): active-subscription quota hit. 429 so an
+        // orchestrator backs off; stable code, no raw count/message leak (P30/P11).
+        return Results.Json(new { error = "SUBSCRIPTION_LIMIT_REACHED" },
+            statusCode: StatusCodes.Status429TooManyRequests);
+    }
     catch (InvalidOperationException ex)
     {
         return Results.BadRequest(new { error = ex.Message });

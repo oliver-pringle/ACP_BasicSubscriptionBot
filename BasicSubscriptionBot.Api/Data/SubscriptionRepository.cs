@@ -73,6 +73,30 @@ public class SubscriptionRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
+    // Audit (2026-05-30 #M3 / P60): active-subscription quota inputs. Each active
+    // row is re-selected every 10s poll + fans out compute + an outbound webhook
+    // POST, so unbounded creation linearly grows standing worker CPU + outbound
+    // HTTP + DB rows on a single-instance / shared-droplet model. CreateAsync gates
+    // on these BEFORE insert. Cheap COUNTs (ix on status already exists).
+    public async Task<int> CountActiveAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM subscriptions WHERE status='active'";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+    }
+
+    public async Task<int> CountActiveByBuyerAsync(string buyerAgent)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        // COLLATE NOCASE so a buyer can't bypass the per-buyer cap by varying
+        // address case (matches the portfolio address-normalisation convention).
+        cmd.CommandText = "SELECT COUNT(*) FROM subscriptions WHERE status='active' AND buyer_agent = $b COLLATE NOCASE";
+        cmd.Parameters.AddWithValue("$b", buyerAgent ?? string.Empty);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+    }
+
     public async Task<Subscription?> GetByIdAsync(string id)
     {
         await using var conn = _db.OpenConnection();
