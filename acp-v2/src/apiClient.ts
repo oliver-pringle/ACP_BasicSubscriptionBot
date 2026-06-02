@@ -34,7 +34,13 @@ export function createApiClient(baseUrl: string, opts: { apiKey?: string } = {})
 
   async function post<T>(path: string, body: unknown): Promise<T> {
     const r = await fetch(`${baseUrl}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error(`POST ${path} -> ${r.status}: ${await r.text()}`);
+    if (!r.ok) {
+      // P63: log the upstream body server-side only; the body can carry RPC API
+      // keys (P9) and internal route detail. Throw an opaque error so seller.ts
+      // never relays it to the marketplace buyer.
+      console.error(`[apiClient] POST ${path} -> ${r.status}: ${await r.text()}`);
+      throw new Error(`upstream error (status ${r.status}) [POST ${path}]`);
+    }
     return (await r.json()) as T;
   }
 
