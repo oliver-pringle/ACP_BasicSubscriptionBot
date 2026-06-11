@@ -102,12 +102,21 @@ public sealed class RateLimitMiddleware
         await _next(ctx);
     }
 
+    // P15 (2026-06-11 audit): hard size cap per bucket dict so a flood of fresh random
+    // X-API-Key headers (each pre-auth) can't grow it unbounded — mirrors EASIssuer/
+    // MEVProtect. Boilerplate fix → propagates to every clone. Once saturated, new keys
+    // are refused (treated as rate-limited); already-tracked keys keep updating.
+    private const int MaxBucketsPerDict = 8192;
+
     private bool TryReserve(
         ConcurrentDictionary<string, (DateTime WindowStart, int Count)> buckets,
         string key,
         int capacity)
     {
         var now = DateTime.UtcNow;
+        // P15 size cap: refuse to create a NEW bucket once the dict is saturated.
+        if (buckets.Count >= MaxBucketsPerDict && !buckets.ContainsKey(key))
+            return false;
         var bucket = buckets.AddOrUpdate(key,
             _ => (now, 1),
             (_, b) => now - b.WindowStart > _window ? (now, 1) : (b.WindowStart, b.Count + 1));
